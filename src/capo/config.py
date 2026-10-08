@@ -38,6 +38,7 @@ class Config:
     precision: str = "bfloat16"
     gradient_checkpointing: bool = True
     actor_tuning: str = "lora"
+    train_vlm: bool = False
     lora_rank: int = 32
     lora_alpha: float = 16.0
     train_action_time_projections: bool = True
@@ -59,7 +60,7 @@ class Config:
     cutoff: float = 0.5
     cutoff_rule: str = "ceil"
     apo_time_samples: int = 5
-    batch_size: int = 240
+    batch_size: int = 256
     microbatch_size: int = 1
     replay_mixture: tuple = (0.4, 0.4, 0.2)  # demo / exec / inter buffers (not sources)
     critic_warmup_steps: int = 200
@@ -96,6 +97,10 @@ class Config:
             raise ValueError("Invalid inactive action dimension")
         if self.actor_tuning not in ("lora", "full"):
             raise ValueError("actor_tuning must be lora or full")
+        if not isinstance(self.train_vlm, bool):
+            raise ValueError("train_vlm must be boolean")
+        if self.train_vlm and (self.actor_tuning != "full" or not self.train_action_time_projections):
+            raise ValueError("Full-parameter SFT requires actor_tuning=full and trainable action/time projections")
         if (
             self.lora_rank < 1
             or not isinstance(self.lora_rank, int)
@@ -142,8 +147,8 @@ class Config:
             or abs(sum(self.replay_mixture) - 1) > 1e-6
         ):
             raise ValueError("replay_mixture must be demo/exec/inter weights summing to one")
-        if sum(self.replay_mixture[:2]) <= 0:
-            raise ValueError("Actor sampling requires positive demo/exec weight")
+        if self.replay_mixture[1] <= 0:
+            raise ValueError("APO sampling requires positive exec weight")
         if (
             self.eta <= 0
             or self.alpha_q <= 0

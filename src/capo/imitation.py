@@ -1,6 +1,6 @@
 """BC supervision selected by the sampled buffer, not the record's source."""
 
-TRAINING_OBJECTIVE = "three_buffer_demo_bc_v1"
+TRAINING_OBJECTIVE = "three_buffer_demo_bc_exec_apo_ceil_v2"
 
 
 def bc_eligible(buffer_id):

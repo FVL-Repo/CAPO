@@ -28,6 +28,8 @@ class Trainer:
     def __init__(self, cfg, actor, replay):
         from capo.identity import canonical
 
+        if cfg.train_vlm:
+            raise ValueError("Online RL freezes the VLM; export full SFT and use its capo_config.json")
         if canonical(cfg.data_spec) != canonical(replay.cfg.data_spec):
             raise ValueError("Trainer and Replay data specifications differ")
         if cfg.backend == "pi05":
@@ -197,7 +199,7 @@ class Trainer:
         for start in range(0, self.local_batch_size, c.microbatch_size):
             end = min(self.local_batch_size, start + c.microbatch_size)
             b = slice_batch(batch, start, end, c.device)
-            # One shared 40/40/20 draw. APO uses demo/exec states; BC uses
+            # One shared rounded 40/40/20 draw. APO uses exec states; BC uses
             # only samples drawn through demo (experts + human interventions).
             if b["apo_mask"].any():
                 a = tree_map(lambda t: t[b["apo_mask"]], b)

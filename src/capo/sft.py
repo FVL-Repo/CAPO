@@ -6,7 +6,6 @@ import random
 import torch
 
 from capo import distributed as parallel
-from capo.adjoint import flow_matching_loss
 from capo.backbone import make_backbone
 from capo.batching import slice_batch
 from capo.checkpoints import load_actor_state
@@ -16,6 +15,8 @@ from capo.demonstrations import DemonstrationDataset
 
 class SFTTrainer:
     def __init__(self, cfg, actor, dataset):
+        if not cfg.train_vlm or not all(p.requires_grad for p in actor.parameters()):
+            raise ValueError("SFT requires all VLM and action-expert parameters to be trainable")
         self.cfg, self.actor, self.dataset = cfg, actor, dataset
         self.rng = random.Random(cfg.seed)
         self.step = 0
@@ -38,8 +39,7 @@ class SFTTrainer:
         for start in range(0, size, c.microbatch_size):
             end = min(size, start + c.microbatch_size)
             b = slice_batch(batch, start, end, c.device)
-            ctx = self.actor.prepare(b["obs"])
-            loss = flow_matching_loss(lambda x, t: self.actor.velocity(ctx, x, t), b["actions"], b["mask"])
+            loss = self.actor.sft_loss(b["obs"], b["actions"], b["mask"])
             (loss * ((end - start) / size)).backward()
             loss_value += loss.detach().item() * (end - start) / size
         parallel.average_gradients(self.params)

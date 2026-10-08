@@ -114,31 +114,50 @@ class Pi05(nn.Module):
                         f"Unsupported nonpersistent meta buffer: {type(module).__name__}.{name}"
                     )
         del expected, tensors, cache
-        self.model.paligemma_with_expert.paligemma.requires_grad_(False)
+        self.model.paligemma_with_expert.paligemma.requires_grad_(cfg.train_vlm)
+        if cfg.train_vlm:
+            self.model.float().requires_grad_(True)
         if cfg.actor_tuning == "lora":
             inject_expert_lora(self.model.paligemma_with_expert.gemma_expert, cfg.lora_rank, cfg.lora_alpha)
         else:
             self.model.paligemma_with_expert.gemma_expert.float()
         for name in ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"):
             getattr(self.model, name).float().requires_grad_(cfg.train_action_time_projections)
-        self.model.eval()
+        self.model.train(cfg.train_vlm)
+        if cfg.train_vlm and cfg.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
     def merge_lora_for_export(self):
         merge_expert_lora(self.model.paligemma_with_expert.gemma_expert)
+
+    def observation(self, obs):
+        images = {
+            k: (v.float() / 127.5 - 1 if v.dtype == torch.uint8 else v.float())
+            for k, v in obs["images"].items()
+        }
+        images = {k: v.permute(0, 3, 1, 2) if v.shape[-1] == 3 else v for k, v in images.items()}
+        return SimpleNamespace(
+            **{"token_ar_mask": None, "token_loss_mask": None, **obs, "images": images}
+        )
+
+    def sft_loss(self, obs, actions, mask):
+        """Joint VLM/expert forward: no detached prefix cache during full SFT."""
+        if not self.cfg.train_vlm:
+            raise ValueError("Full-parameter SFT requires train_vlm=true")
+        with torch.autocast(actions.device.type, dtype=torch.bfloat16,
+                            enabled=self.cfg.precision == "bfloat16"):
+            residual = self.model(
+                self.observation(obs), actions, noise=torch.randn_like(actions),
+                time=torch.rand(len(actions), device=actions.device),
+            )
+        return (residual.float() * mask).flatten(1).sum(1).mean()
 
     @torch.no_grad()
     def prepare(self, obs):
         from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
         from openpi.models_pytorch.preprocessing_pytorch import preprocess_observation_pytorch
 
-        images = {
-            k: (v.float() / 127.5 - 1 if v.dtype == torch.uint8 else v.float())
-            for k, v in obs["images"].items()
-        }
-        images = {k: v.permute(0, 3, 1, 2) if v.shape[-1] == 3 else v for k, v in images.items()}
-        observation = SimpleNamespace(
-            **{"token_ar_mask": None, "token_loss_mask": None, **obs, "images": images}
-        )
+        observation = self.observation(obs)
         observation = preprocess_observation_pytorch(observation, train=False, image_keys=self.cfg.image_keys)
         prefix, mask, ar = self.model.embed_prefix(
             list(observation.images.values()),
@@ -172,6 +191,8 @@ class Pi05(nn.Module):
         return evaluate(x, tau)
 
     def reference(self):
+        if self.cfg.train_vlm:
+            raise ValueError("Export the full SFT model before creating a frozen-prefix RL reference")
         ref = copy.copy(self)
         ref._modules = self._modules.copy()
         ref.model = copy.copy(self.model)

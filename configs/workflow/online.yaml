@@ -1,8 +1,7 @@
-# Use the bound config emitted by preparation/SFT, not an unbound template.
-training_config: runs/sft/config.json
+# Export full SFT first so the frozen online VLM includes its learned weights.
+training_config: assets/capo_sft/capo_config.json
 robot_config: configs/robots/flexiv.yaml
 norm_stats: assets/task/norm_stats.json
-actor_init: runs/sft/sft.pt
 adapter: capo.robots.flexiv_client:create
 reward_config: configs/workflow/reward.yaml
 train_processes: 8

@@ -34,7 +34,7 @@ CAPO starts from a task-adapted VLA, collects human-assisted experience, and alt
 | Human-assisted collection and online workflow | [collect.py](src/capo/collect.py), [workflow.py](src/capo/workflow.py) |
 | OpenPI π₀.₅ backbone and expert adaptation | [backbone.py](src/capo/backbone.py), [lora.py](src/capo/lora.py) |
 
-This repository provides CAPO with an OpenPI π₀.₅ backbone, expert LoRA, and a Flexiv interface. All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
+This repository provides CAPO with an OpenPI π₀.₅ backbone, full-parameter SFT, and a Flexiv interface. Online RL freezes the SFT VLM and updates the action expert (with optional LoRA). All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
 
 ## Setup
 
@@ -74,7 +74,7 @@ Follow [OpenPI's fine-tuning guide](https://github.com/Physical-Intelligence/ope
 | --- | --- |
 | `configs/robots/flexiv.yaml` | Robot/camera IDs, workspace, reset pose, teleoperation, task |
 | `configs/workflow/dataset.yaml` | Adapter, data paths, task, normalization |
-| `configs/workflow/sft.yaml` | Base weights, dimensions, horizons, LoRA, batch size, schedule |
+| `configs/workflow/sft.yaml` | Base weights, full-parameter SFT, dimensions, horizons, batch size, schedule |
 
 Start the [robot server](docs/robot.md), then collect and prepare demonstrations:
 
@@ -88,7 +88,7 @@ torchrun --standalone --nproc-per-node=8 -m capo.sft \
 
 `prepare` computes normalization with OpenPI's `RunningStats`. Add `--existing-norm` to reuse matching task statistics. Existing demonstrations can use the [NPZ format](docs/data.md).
 
-SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 240, microbatch 32 per GPU on eight GPUs (30 samples per GPU). Adjust these for your hardware.
+SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. SFT trains the entire VLM and action expert. The template uses global batch 256, microbatch 1 per GPU on eight GPUs (32 samples accumulated per GPU). Adjust these for your hardware.
 
 ## 2. Reward model (optional)
 
@@ -102,7 +102,13 @@ Set `enabled: true` to use the classifier, or `false` for manual success labelin
 
 ## 3. Online RL
 
-Configure `configs/workflow/online.yaml` with the SFT configuration/checkpoint, matching normalization, robot adapter, reward config, and update budgets:
+Export the full SFT model first. This preserves its trained VLM in the frozen online base:
+
+```bash
+python scripts/export_policy.py --checkpoint runs/sft/sft.pt --output assets/capo_sft
+```
+
+Configure `configs/workflow/online.yaml` with `assets/capo_sft/capo_config.json`, matching normalization, robot adapter, reward config, and update budgets. The exported configuration uses `train_vlm: false` and full action-expert updates. Set `actor_tuning: lora` in the online training overrides only when LoRA is intended:
 
 ```bash
 python -m capo.workflow --config configs/workflow/online.yaml
@@ -110,7 +116,7 @@ python -m capo.workflow --config configs/workflow/online.yaml
 
 Collection and learning run concurrently. After 200 one-time critic warmup updates, the learner repeats one critic-only update followed by one critic update and one actor update. The reference refreshes every 500 actor updates; there is no episodes-per-learning-round setting. Policy publication is separate and defaults to every 100 actor updates. Re-run the same command to resume, or increase `max_actor_steps` to extend a completed run. See [training design](docs/method.md).
 
-Three-buffer replay routes offline experts to demo, online execution to exec, and interventions to demo+exec (also inter when same-state pairs are available). CVL samples demo/exec/inter at 40/40/20; all sampled executed transitions receive TD and only the sampled inter pairs receive ranking. Actor updates use one 40/40/20 batch: BC selects only demo-buffer segments (experts and interventions), and APO uses demo/exec states. See [data and sampling contracts](docs/data.md).
+Three-buffer replay routes offline experts to demo, online execution to exec, and interventions to demo+exec (also inter when same-state pairs are available). CVL samples demo/exec/inter at 40/40/20; all sampled executed transitions receive TD and only the sampled inter pairs receive ranking. Actor updates use one 40/40/20 batch: BC selects only demo-buffer segments (experts and interventions), and APO uses only exec-buffer states. Demo and exec counts are rounded upward; inter receives the remainder (103/103/50 for batch 256). See [data and sampling contracts](docs/data.md).
 
 Flexiv uses `CAPO_FLEXIV_URL` and `configs/robots/flexiv.yaml`, with control frequency set to 30 Hz. Other robots plug in through the YAML `adapter: package.module:create` field, see [robot integration](docs/robot.md).
 
@@ -133,7 +139,7 @@ python -m capo.serve --config assets/capo_export/capo_config.json \
   --norm-stats assets/task/norm_stats.json
 ```
 
-Set `device` in the exported configuration to `cuda` for GPU inference. Use your task's normalization path in both commands.
+The exported configuration uses `device: cuda`; set it to `cpu` for CPU inference. Use your task's normalization path in both commands.
 
 ## Acknowledgments
 
