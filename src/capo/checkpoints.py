@@ -24,6 +24,7 @@ def check_actor_config(actor, saved):
     if not actor.cfg.base_sha256 or saved.get("base_sha256") != actor.cfg.base_sha256:
         raise ValueError("Actor base content hash mismatch or missing; migrate legacy checkpoint explicitly")
     defaults = {
+        "train_vlm": False,
         "actor_tuning": "full",
         "lora_rank": 32,
         "lora_alpha": 16.0,

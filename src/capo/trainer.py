@@ -28,6 +28,8 @@ class Trainer:
     def __init__(self, cfg, actor, replay):
         from capo.identity import canonical
 
+        if cfg.train_vlm:
+            raise ValueError("Online RL freezes the VLM; export full SFT and use its capo_config.json")
         if canonical(cfg.data_spec) != canonical(replay.cfg.data_spec):
             raise ValueError("Trainer and Replay data specifications differ")
         if cfg.backend == "pi05":
@@ -150,8 +152,8 @@ class Trainer:
                     values.append(self.target.from_features(features, actions))
                 y = td_target(b["reward"], b["terminated"], b["duration"], torch.stack(values, 1), c.gamma)
                 del ctx, features, values
-            
-            
+            # All demo/exec samples, plus the executed corrective side of inter.
+            # Rejected inter proposals have no observed reward/successor and never get TD.
             q = self.critic(b["obs"], self.project(b["actions"]), self.project(b["mask"]))
             td = (q - y[:, None]).square().mean()
             (td * fraction).backward()
@@ -164,8 +166,8 @@ class Trainer:
                 human = self.critic.from_features(features, self.project(p["actions"]), mask)
                 rejected = self.critic.from_features(features, self.project(p["rejected_actions"]), mask)
                 rank = ranking_loss(human, rejected, c.margin)
-                
-                
+                # Mean over the GLOBAL inter subset, even when ranks/microbatches
+                # contain different pair counts (including zero).
                 rank_fraction = p["ranking_weight"].sum() / self.local_batch_size
                 (c.rank_weight * rank_fraction * rank).backward()
                 metrics["rank"] += rank.detach().item() * rank_fraction.item()
@@ -197,8 +199,8 @@ class Trainer:
         for start in range(0, self.local_batch_size, c.microbatch_size):
             end = min(self.local_batch_size, start + c.microbatch_size)
             b = slice_batch(batch, start, end, c.device)
-            
-            
+            # One shared rounded 40/40/20 draw. APO uses exec states; BC uses
+            # only samples drawn through demo (experts + human interventions).
             if b["apo_mask"].any():
                 a = tree_map(lambda t: t[b["apo_mask"]], b)
                 fraction = (a["apo_weight"].sum() / self.local_batch_size).item()

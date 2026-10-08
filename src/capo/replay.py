@@ -164,7 +164,7 @@ class Replay:
                 self.buffers[name].pop(0)
                 evicted = True
         if evicted:
-            
+            # Independent FIFO capacities. Shared transitions remain while any buffer owns them.
             retained = sorted(set().union(*map(set, self.buffers.values())))
             remap = {old: new for new, old in enumerate(retained)}
             self.records.entries = [self.records.entries[j] for j in retained]
@@ -266,22 +266,21 @@ class Replay:
             if name not in BUFFERS:
                 raise ValueError(f"Unknown replay view: {view}")
             weights = [float(k == name) for k in BUFFERS]
-        counts = [round(count * w) for w in weights]
-        if sum(counts) != count or any(not math.isclose(count * w, n, abs_tol=1e-8)
-                                       for w, n in zip(weights, counts)):
-            raise ValueError("Batch size must realize the exact demo/exec/inter ratio; "
-                             "use a multiple of 5 (and the GPU world size) for 40/40/20")
+        counts = [math.ceil(count * w) for w in weights[:2]]
+        counts.append(count - sum(counts))
+        if counts[2] < 0:
+            raise ValueError("Batch too small for ceil(demo), ceil(exec), remainder(inter); increase batch_size")
         choices = []
         for buffer_id, (name, n) in enumerate(zip(BUFFERS, counts)):
             if n and not self.buffers[name]:
                 raise ValueError(f"{name} buffer is empty; collect/import data before sampling (no renormalization)")
             choices.extend((i, buffer_id) for i in self.rng.choices(self.buffers[name], k=n))
         self.rng.shuffle(choices)
-        
-        
+        # Compute denominators before rank slicing: subsets can be uneven or empty
+        # on a rank. Averaging rank gradients must equal the global subset mean.
         bc_count = sum(bc_eligible(b)
                        for i, b in choices)
-        apo_count = sum(b != 2 for _, b in choices)
+        apo_count = sum(b == 1 for _, b in choices)
         samples = []
         for i, buffer_id in choices[start:end]:
             source_id = SOURCES.index(self.records.entries[i]["source"])
@@ -292,8 +291,8 @@ class Replay:
                 source_id=torch.tensor(source_id),
                 bc_mask=torch.tensor(use_bc),
                 bc_weight=torch.tensor(count / bc_count if use_bc else 0.0),
-                apo_mask=torch.tensor(buffer_id != 2),
-                apo_weight=torch.tensor(count / apo_count if buffer_id != 2 else 0.0),
+                apo_mask=torch.tensor(buffer_id == 1),
+                apo_weight=torch.tensor(count / apo_count if buffer_id == 1 else 0.0),
                 record_index=torch.tensor(i),
                 ranking_mask=torch.tensor(buffer_id == 2),
                 ranking_weight=torch.tensor(count / counts[2] if buffer_id == 2 else 0.0),

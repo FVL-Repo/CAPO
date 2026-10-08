@@ -30,6 +30,10 @@ def main():
     from capo.identity import file_sha256
 
     cfg.base_sha256 = file_sha256(output / "model.safetensors")
+    # The exported base contains the complete SFT VLM. Online RL freezes it.
+    cfg.train_vlm = False
+    cfg.actor_tuning = "full"
+    cfg.device = "cuda"
     cfg.save(output / "capo_config.json")
     print(output / "model.safetensors")
 

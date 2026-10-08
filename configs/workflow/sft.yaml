@@ -1,3 +1,4 @@
+# Full-parameter pi05 SFT. Batch 256 / 8 GPUs = 32 per GPU; CVL demo/exec/inter=103/103/50.
 backend: pi05
 seed: 42
 device: cuda
@@ -30,8 +31,9 @@ flow_steps: 10
 cutoff: 0.5
 cutoff_rule: ceil
 apo_time_samples: 5
-batch_size: 240
-microbatch_size: 32
+batch_size: 256
+microbatch_size: 1
+# demo / exec / inter buffer sampling for CVL.
 replay_mixture:
 - 0.4
 - 0.4
@@ -61,7 +63,8 @@ critic_resnet_weights: assets/resnet10.safetensors
 critic_visual_dim: 256
 critic_proprio_dim: 64
 critic_spatial_blocks: 8
-actor_tuning: lora
+actor_tuning: full
+train_vlm: true
 lora_rank: 32
 lora_alpha: 16.0
 train_action_time_projections: true
