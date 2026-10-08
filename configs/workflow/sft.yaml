@@ -1,4 +1,4 @@
-# OpenPI pi05 base + expert LoRA SFT. Global batch 256 / 8 GPUs = 32 per GPU.
+# OpenPI pi05 base + expert LoRA SFT. Global batch 240 / 8 GPUs = 30 per GPU; CVL demo/exec/inter=96/96/48.
 backend: pi05
 seed: 42
 device: cuda
@@ -31,17 +31,17 @@ flow_steps: 10
 cutoff: 0.5
 cutoff_rule: ceil
 apo_time_samples: 5
-batch_size: 256
+batch_size: 240
 microbatch_size: 32
+# demo / exec / inter buffer sampling for CVL.
 replay_mixture:
 - 0.4
 - 0.4
 - 0.2
-bc_correction_fraction: 0.5
 critic_warmup_steps: 200
-critic_steps_per_round: 198
-actor_steps_per_round: 100
-rounds: 100
+max_actor_steps: 10000
+reference_refresh_interval: 500
+policy_publish_interval: 100
 sft_steps: 20000
 critic_lr: 3.0e-05
 actor_lr: 2.0e-05

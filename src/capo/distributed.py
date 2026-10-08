@@ -1,8 +1,20 @@
 from datetime import timedelta
 import os
+import socket
 
 import torch
 import torch.distributed as dist
+
+
+def local_launch_args(processes):
+    """Launch one-node workers without relying on a resolvable container hostname."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    return [
+        "--nnodes=1", "--node-rank=0", "--master-addr=127.0.0.1",
+        f"--master-port={port}", f"--nproc-per-node={processes}",
+    ]
 
 
 def active():

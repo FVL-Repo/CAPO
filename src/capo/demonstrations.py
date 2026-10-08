@@ -1,5 +1,6 @@
 import argparse
 from collections import OrderedDict
+from contextlib import nullcontext
 import json
 import os
 import uuid
@@ -57,9 +58,9 @@ def raw_samples(path, cfg):
             raise ValueError(f"Invalid action coordinates in {path}")
         metadata = json.loads(str(data["robot_metadata"])) if "robot_metadata" in data else {}
         prompt = str(data["prompt"]) if "prompt" in data else cfg.data_spec["task"]
-        for camera in cfg.image_keys:
-            key = "image/" + camera
-            if key in data and (len(data[key]) != len(states) or data[key].dtype != np.uint8):
+        images = {k: data["image/" + k] for k in cfg.image_keys if "image/" + k in data}
+        for camera, image in images.items():
+            if len(image) != len(states) or image.dtype != np.uint8:
                 raise ValueError(f"Camera/sample mismatch in {path}: {camera}")
         for i in range(len(states)):
             if actions.ndim == 2:
@@ -74,7 +75,7 @@ def raw_samples(path, cfg):
                     "state": states[i],
                     "prompt": prompt,
                     "robot_metadata": metadata,
-                    "images": {k: data["image/" + k][i] for k in cfg.image_keys if "image/" + k in data},
+                    "images": {k: v[i] for k, v in images.items()},
                 },
                 commands,
             )
@@ -89,36 +90,102 @@ def collect_raw(cfg, options, robot, episodes):
     for _ in range(episodes):
         episode = uuid.uuid4().hex
         obs = robot.reset()
-        while True:
-            selected, human, _ = robot.choose_action(
-                obs, np.zeros((cfg.execution_horizon, cfg.robot_action_dim), np.float32)
-            )
-            if not human:
-                raise ValueError("SFT collection requires human control")
-            result = robot.execute(selected)
-            if result.get("quarantined") or result.get("safety_abort"):
-                raise RuntimeError("Unconfirmed execution; inspect robot journal before continuing")
-            if not result.get("retry") and not result.get("boundary"):
-                commands = np.asarray(result.get("commands", result["actions"]), np.float32)
-                if not 1 <= len(commands) <= cfg.action_horizon or result["human_steps"] != len(commands):
-                    raise ValueError("Expected confirmed human command chunk")
-                arrays = {
-                    "state": np.asarray(obs["state"], np.float32)[None],
-                    "actions": commands[None],
-                    "lengths": np.asarray([len(commands)]),
-                    "prompt": np.asarray(obs["prompt"]),
-                    "robot_metadata": np.asarray(json.dumps(obs.get("robot_metadata", {}))),
-                    **{"image/" + k: np.asarray(v)[None] for k, v in obs["images"].items()},
-                }
-                path = output / f"{episode}_{count:08d}.npz"
-                with path.with_suffix(".tmp").open("wb") as stream:
-                    np.savez_compressed(stream, **arrays)
-                path.with_suffix(".tmp").replace(path)
-                count += 1
-            if result.get("terminated") or result.get("truncated"):
-                break
-            obs = result["next_obs"]
+        pending = None
+
+        def flush_raw():
+            nonlocal pending
+            if pending is None:
+                return
+            path, arrays = pending
+            with path.with_suffix(".tmp").open("wb") as stream:
+                np.savez_compressed(stream, **arrays)
+            path.with_suffix(".tmp").replace(path)
+            pending = None
+
+        try:
+            while True:
+                selected, human, _ = robot.choose_action(
+                    obs, np.zeros((cfg.execution_horizon, cfg.robot_action_dim), np.float32)
+                )
+                if not human:
+                    raise ValueError("SFT collection requires human control")
+                result = robot.execute(selected)
+                if result.get("quarantined") or result.get("safety_abort"):
+                    if pending is not None:
+                        pending[1]["truncated"][0] = True
+                        flush_raw()
+                    raise RuntimeError("Unconfirmed execution; inspect robot journal before continuing")
+                if result.get("boundary") and pending is not None:
+                    arrays = pending[1]
+                    if result.get("reward_override") is not None:
+                        arrays["rewards"][0, -1] = result["reward_override"]
+                    arrays["terminated"][0] = result["terminated"]
+                    arrays["truncated"][0] = result["truncated"]
+                    arrays["next_state"] = np.asarray(result["next_obs"]["state"], np.float32)[None]
+                    for k, v in result["next_obs"]["images"].items():
+                        arrays["next_image/" + k] = np.asarray(v)[None]
+                if not result.get("retry") and not result.get("boundary"):
+                    flush_raw()
+                    commands = np.asarray(result.get("commands", result["actions"]), np.float32)
+                    if not 1 <= len(commands) <= cfg.action_horizon or result["human_steps"] != len(commands):
+                        raise ValueError("Expected confirmed human command chunk")
+                    arrays = {
+                        "state": np.asarray(obs["state"], np.float32)[None],
+                        "actions": commands[None],
+                        "applied_actions": np.asarray(result["actions"], np.float32)[None],
+                        "lengths": np.asarray([len(commands)]),
+                        "prompt": np.asarray(obs["prompt"]),
+                        "robot_metadata": np.asarray(json.dumps(obs.get("robot_metadata", {}))),
+                        **{"image/" + k: np.asarray(v)[None] for k, v in obs["images"].items()},
+                        "next_state": np.asarray(result["next_obs"]["state"], np.float32)[None],
+                        "rewards": np.asarray(result["rewards"], np.float32)[None],
+                        "terminated": np.asarray([result["terminated"]], dtype=bool),
+                        "truncated": np.asarray([result["truncated"]], dtype=bool),
+                        **{"next_image/" + k: np.asarray(v)[None] for k, v in result["next_obs"]["images"].items()},
+                    }
+                    path = output / f"{episode}_{count:08d}.npz"
+                    pending = path, arrays
+                    count += 1
+                if result.get("terminated") or result.get("truncated"):
+                    flush_raw()
+                    break
+                obs = result["next_obs"]
+        except BaseException:
+            if pending is not None:
+                pending[1]["truncated"][0] = True
+                flush_raw()
+            raise
     return count
+
+
+def raw_transition(path, index, raw, commands, cfg, processor, *, archive=None):
+    """Optional real TD transition alongside a supervised sample; never infer missing rewards."""
+    from capo.collect import make_record
+
+    fields = {"next_state", "rewards", "terminated", "truncated"}
+    with (nullcontext(archive) if archive is not None else np.load(path, allow_pickle=False)) as data:
+        present = fields.intersection(data)
+        if not present:
+            return None
+        if present != fields or data["actions"].ndim != 3:
+            raise ValueError("TD demonstrations require chunked actions and complete successor/reward/boundary fields")
+        cameras = {k: data["next_image/" + k][index] for k in raw["images"]}
+        result = {
+            "actions": data["applied_actions"][index, :len(commands)] if "applied_actions" in data else commands,
+            "commands": commands,
+            "rewards": data["rewards"][index, :len(commands)],
+            "next_obs": {**raw, "state": data["next_state"][index], "images": cameras},
+            "human_steps": len(commands), "terminated": bool(data["terminated"][index]),
+            "truncated": bool(data["truncated"][index]),
+            "success": False, "safety_abort": False,
+        }
+        # Success labels are not needed by TD. Do not synthesize them from terminal flags.
+        record = make_record(cfg, processor, raw, commands, result,
+                             human=True, aligned=False, demonstration=True)
+        record["metadata"].pop("success", None)
+        if "applied_actions" not in data:
+            record.pop("applied_actions", None)
+        return record
 
 
 def prepare(cfg, options, *, existing_norm=False):
@@ -149,25 +216,39 @@ def prepare(cfg, options, *, existing_norm=False):
             )
         stats_path.write_text(serialize_json({k: v.get_statistics() for k, v in stats.items()}) + "\n")
     processor = Processor(cfg, stats_path, quantile=options.get("quantile", True))
-    manifest = {"format": "capo_demonstrations_v1", "data_spec": cfg.data_spec, "shards": [], "raw": []}
+    manifest = {"format": "capo_demonstrations_v1", "data_spec": cfg.data_spec, "shards": [], "raw": [], "td_transitions": 0}
+    manifest["transition_metadata"] = {
+        k: getattr(cfg, k)
+        for k in ("action_horizon", "execution_horizon", "action_dim", "robot_action_dim", "gamma")
+    }
     pending = []
+    transitions = []
 
     def flush():
         path = output / f"samples_{len(manifest['shards']):06d}.pt"
-        torch.save({"samples": pending}, path.with_suffix(".tmp"))
+        torch.save({"samples": pending, "transitions": transitions}, path.with_suffix(".tmp"))
         path.with_suffix(".tmp").replace(path)
         manifest["shards"].append({"file": path.name, "count": len(pending), "sha256": file_sha256(path)})
         pending.clear()
+        transitions.clear()
 
     for path in files:
         manifest["raw"].append({"path": str(path), "sha256": file_sha256(path)})
-        for raw, commands in raw_samples(path, cfg):
+        # NPZ decompresses whole arrays on access; cache successors once per episode.
+        with np.load(path, allow_pickle=False) as source:
+            td_data = {k: source[k] for k in source.files if k.startswith("next_image/") or k in
+                       {"actions", "applied_actions", "next_state", "rewards", "terminated", "truncated"}}
+        for index, (raw, commands) in enumerate(raw_samples(path, cfg)):
             mask = torch.zeros(cfg.action_horizon, cfg.action_dim, dtype=torch.bool)
             mask[: len(commands), : cfg.robot_action_dim] = True
             mask[:, list(cfg.inactive_action_dims)] = False
             pending.append(
                 {"obs": processor.observation(raw), "actions": processor.actions(commands), "mask": mask}
             )
+            transition = raw_transition(path, index, raw, commands, cfg, processor, archive=td_data)
+            if transition is not None:
+                transitions.append(transition)
+                manifest["td_transitions"] += 1
             if len(pending) == 64:
                 flush()
     if pending:

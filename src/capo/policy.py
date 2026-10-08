@@ -46,3 +46,33 @@ class Policy:
 
     def reset(self):
         pass
+
+
+class LivePolicy(Policy):
+    """Reload atomically published weights between action chunks, never mid-chunk."""
+
+    def __init__(self, cfg, pointer, processor=None):
+        self.pointer = local_path(pointer)
+        self.version = None
+        self.actor_step = 0
+        super().__init__(cfg, processor=processor)
+        self.reload()
+
+    def reload(self):
+        import json
+        from capo.identity import file_sha256
+
+        publication = json.loads(self.pointer.read_text())
+        if publication["sha256"] == self.version:
+            return
+        path = local_path(publication["checkpoint"])
+        if file_sha256(path) != publication["sha256"]:
+            raise ValueError("Published collector policy checksum mismatch")
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        load_actor_state(self.actor, payload["actor"], payload["config"])
+        self.version = publication["sha256"]
+        self.actor_step = publication["actor_step"]
+
+    def infer(self, observation):
+        self.reload()
+        return super().infer(observation)

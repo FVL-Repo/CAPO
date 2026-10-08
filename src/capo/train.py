@@ -1,4 +1,5 @@
 import argparse
+import time
 
 import torch
 
@@ -13,13 +14,16 @@ from capo.checkpoints import load_actor_state
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CAPO pi_05: offline replay or alternating online shard ingestion"
+        description="CAPO: one-time warmup, C / (C+A) updates and persistent reference snapshots"
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--resume", help="Continue optimizer/RNG/phase/reference state")
     parser.add_argument("--actor-init", help="Load a CAPO SFT actor, start fresh critics and optimizers")
     parser.add_argument("--stage", choices=("rl", "sft"), default="rl")
     parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--streaming", action="store_true", help="Wait for initial replay and ingest new shards while learning")
+    parser.add_argument("--publish-dir")
+    parser.add_argument("--stop-file")
     args = parser.parse_args()
     if args.resume and args.actor_init:
         parser.error("--resume and --actor-init are mutually exclusive")
@@ -50,9 +54,31 @@ def main():
         cfg.save(output / "config.json")
     replay = Replay(cfg)
     if not args.resume:
+        replay.load_demonstrations()
         replay.refresh(local_path(cfg.replay))
-    if not args.resume and not replay.records:
-        raise ValueError("Replay is empty. Import demonstrations or collect data first.")
+    def stop_requested():
+        import torch.distributed as dist
+        stop = bool(args.stop_file and local_path(args.stop_file).exists()) if parallel.rank() == 0 else None
+        if parallel.active():
+            message = [stop]
+            dist.broadcast_object_list(message, src=0)
+            stop = message[0]
+        return stop
+
+    def ready():
+        return all(not weight or replay.buffers[name]
+                   for name, weight in zip(("demo", "exec", "inter"), cfg.replay_mixture))
+
+    if not args.resume:
+        while not ready():
+            if stop_requested():
+                raise RuntimeError("Stopped before initial replay became ready")
+            if not args.streaming:
+                raise ValueError("Import/collect data for each positive-weight replay buffer before training")
+            if parallel.rank() == 0:
+                print("Waiting for initial demo/exec/inter replay", flush=True)
+            time.sleep(1)
+            replay.refresh(local_path(cfg.replay))
     actor = make_backbone(cfg)
     if parallel.rank() == 0:
         cfg.save(output / "config.json")
@@ -64,38 +90,31 @@ def main():
     if args.resume:
         trainer.restore(local_path(args.resume))
 
-    def update():
-        metrics = trainer.cvl_update() if trainer.phase in ("critic", "warmup") else trainer.actor_update()
+    from capo.exchange import publish_actor
+    from capo.schedule import validate_schedule_state
+
+    validate_schedule_state(trainer)
+    if trainer.actor_step > cfg.max_actor_steps:
+        raise ValueError("Checkpoint exceeds requested actor budget")
+    # Restart collector from the exact resumed actor, not a newer pre-crash publication.
+    if args.publish_dir and parallel.rank() == 0:
+        publish_actor(actor, cfg, local_path(args.publish_dir), trainer.actor_step)
+    while trainer.actor_step < cfg.max_actor_steps:
+        if stop_requested():
+            break
+        replay.refresh(local_path(cfg.replay))
+        metrics = trainer.scheduled_update()
         log_metrics(output / "metrics.jsonl", trainer, metrics)
-        if args.save_every > 0 and trainer.phase_step % args.save_every == 0:
+        optimizer_steps = trainer.critic_step + trainer.actor_step
+        if (args.save_every > 0 and optimizer_steps % args.save_every == 0) or metrics.get("reference_refreshed"):
             trainer.save(output / "latest.pt")
-
-    if trainer.phase == "sft":
-        raise ValueError("Use --actor-init to start RL from SFT with fresh optimizers")
-
-    if trainer.critic_step < cfg.critic_warmup_steps:
-        if trainer.phase != "warmup":
-            trainer.set_phase("warmup")
-        while trainer.critic_step < cfg.critic_warmup_steps:
-            update()
-    if trainer.phase == "warmup":
-        trainer.set_phase("idle")
-        trainer.save(output / "latest.pt")
-    while trainer.round < cfg.rounds:
-        if trainer.phase == "idle":
-            replay.refresh(local_path(cfg.replay))
-            trainer.set_phase("critic")
-        if trainer.phase == "critic":
-            while trainer.phase_step < cfg.critic_steps_per_round:
-                update()
-            trainer.set_phase("actor")
-            trainer.save(output / "latest.pt")
-        if trainer.phase == "actor":
-            while trainer.phase_step < cfg.actor_steps_per_round:
-                update()
-            trainer.round += 1
-            trainer.set_phase("idle")
-            trainer.save(output / "latest.pt")
+        if (args.publish_dir and trainer.phase == "actor"
+                and trainer.actor_step % cfg.policy_publish_interval == 0 and parallel.rank() == 0):
+            publish_actor(actor, cfg, local_path(args.publish_dir), trainer.actor_step)
+    trainer.set_phase("idle")
+    trainer.save(output / "latest.pt")
+    if args.publish_dir and parallel.rank() == 0:
+        publish_actor(actor, cfg, local_path(args.publish_dir), trainer.actor_step)
     print(f"Finished. Checkpoint: {output / 'latest.pt'}")
 
 

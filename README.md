@@ -88,7 +88,7 @@ torchrun --standalone --nproc-per-node=8 -m capo.sft \
 
 `prepare` computes normalization with OpenPI's `RunningStats`. Add `--existing-norm` to reuse matching task statistics. Existing demonstrations can use the [NPZ format](docs/data.md).
 
-SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 256, microbatch 32 per GPU on eight GPUs. Adjust these for your hardware.
+SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 240, microbatch 32 per GPU on eight GPUs (30 samples per GPU). Adjust these for your hardware.
 
 ## 2. Reward model (optional)
 
@@ -108,9 +108,11 @@ Configure `configs/workflow/online.yaml` with the SFT configuration/checkpoint, 
 python -m capo.workflow --config configs/workflow/online.yaml
 ```
 
-Each round collects transitions, updates the critic with CVL and the actor with APO + BC, then publishes the actor. Re-run the same command to resume.
+Collection and learning run concurrently. After 200 one-time critic warmup updates, the learner repeats one critic-only update followed by one critic update and one actor update. The reference refreshes every 500 actor updates; there is no episodes-per-learning-round setting. Policy publication is separate and defaults to every 100 actor updates. Re-run the same command to resume, or increase `max_actor_steps` to extend a completed run. See [training design](docs/method.md).
 
-Flexiv uses `CAPO_FLEXIV_URL` and `configs/robots/flexiv.yaml`. Other robots plug in through the YAML `adapter: package.module:create` field, see [robot integration](docs/robot.md).
+Three-buffer replay routes offline experts to demo, online execution to exec, and interventions to demo+exec (also inter when same-state pairs are available). CVL samples demo/exec/inter at 40/40/20; all sampled executed transitions receive TD and only the sampled inter pairs receive ranking. Actor updates use one 40/40/20 batch: BC selects only demo-buffer segments (experts and interventions), and APO uses demo/exec states. See [data and sampling contracts](docs/data.md).
+
+Flexiv uses `CAPO_FLEXIV_URL` and `configs/robots/flexiv.yaml`, with control frequency set to 30 Hz. Other robots plug in through the YAML `adapter: package.module:create` field, see [robot integration](docs/robot.md).
 
 ## 4. Policy serving and export
 

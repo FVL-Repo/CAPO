@@ -12,12 +12,12 @@ def main():
     output = local_path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     for ranking in (False, True):
-        for correction_bc in (False, True):
-            name = f"rank{int(ranking)}_correction_bc{int(correction_bc)}"
+        for bc in (False, True):
+            name = f"rank{int(ranking)}_bc{int(bc)}"
             variant = replace(
                 cfg,
                 rank_weight=cfg.rank_weight if ranking else 0.0,
-                bc_correction_fraction=cfg.bc_correction_fraction if correction_bc else 0.0,
+                bc_weight=cfg.bc_weight if bc else 0.0,
                 output=str(local_path(cfg.output) / name),
             )
             variant.save(output / (name + ".json"))
