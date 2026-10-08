@@ -1,0 +1,7 @@
+# Standalone robot-host environment (Python 3.10); no Torch/JAX/OpenPI required.
+numpy==2.2.6
+flexivrdk==1.9.0
+pyrealsense2==2.58.4.10922
+opencv-python==5.0.0.93
+msgpack==1.2.2
+PyYAML==6.0.3

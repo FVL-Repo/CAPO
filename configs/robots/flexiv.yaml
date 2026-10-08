@@ -1,0 +1,75 @@
+# Example only: calibrate workspace, reset pose, cameras and teleoperation before hardware use.
+robot_sn: YOUR_ROBOT_SERIAL
+network_interfaces:
+- YOUR_ROBOT_INTERFACE_IP
+gripper_name: Flexiv-GN01
+command_gripper: false
+stiffness_ratio: 0.2
+reset_joint_deg:
+- 0
+- -40
+- 0
+- 90
+- 0
+- 40
+- 0
+reset_velocity_percent: 15
+workspace_min:
+- 0.4
+- -0.2
+- -0.35
+workspace_max:
+- 0.7
+- 0.3
+- 0.2
+local_xy_radius: 0.1
+max_translation_step_m: 0.001
+max_rotation_step_rad: 0.02
+control_hz: 50
+execution_horizon: 10
+max_episode_steps: 600
+camera_max_age_s: 0.5
+decision_timeout_s: 30.0
+idle_stop_s: 60.0
+state_format: tcp_xyz_quaternion_wxyz_gripper_width_m
+action_format: delta_xyz_m_euler_xyz_rad_base_absolute_gripper_width_m
+prompt: Perform the configured task.
+step_reward: -0.05
+intermediate_reward: 10.0
+success_reward: 10.0
+success_events: 1
+image_keys:
+- base_0_rgb
+- left_wrist_0_rgb
+- right_wrist_0_rgb
+cameras:
+- name: base_0_rgb
+  source_name: cam_high
+  serial_number: YOUR_CAMERA_0_SERIAL
+  width: 640
+  height: 480
+  fps: 30
+- name: left_wrist_0_rgb
+  source_name: cam_low
+  serial_number: YOUR_CAMERA_1_SERIAL
+  width: 640
+  height: 480
+  fps: 30
+teleop:
+  device_path: null
+  vendor_id: 9583
+  product_id: 50746
+  deadzone: 0.1
+  motion_threshold: 0.1
+  pos_scale: 0.002
+  rot_scale: 0.01
+  response_exponent: 2.0
+  translation_frame: base
+  operator_translation_order:
+  - 0
+  - 1
+  - 2
+  operator_translation_signs:
+  - 1.0
+  - 1.0
+  - 1.0

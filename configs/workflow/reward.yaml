@@ -1,0 +1,22 @@
+# enabled=false: manual Enter success; enabled=true: model success with operator review.
+# Interactive rewards are fixed: ordinary step -0.05, confirmed success 10.
+enabled: false
+interactive: true
+# Set init_checkpoint to an existing classifier.pt to fine-tune on appended hard examples.
+init_checkpoint: null
+dataset: data/reward/train
+validation: data/reward/validation
+output: runs/reward
+checkpoint: runs/reward/classifier.pt
+image_keys: [base_0_rgb, left_wrist_0_rgb]
+device: cuda:0
+encoder: assets/resnet10.safetensors
+hidden_dim: 256
+dropout: 0.1
+batch_size: 16
+steps: 500
+learning_rate: 0.0001
+threshold: 0.9
+success_reward: 10.0
+step_reward: -0.05
+seed: 42

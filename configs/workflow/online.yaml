@@ -1,0 +1,17 @@
+# Use the bound config emitted by preparation/SFT, not an unbound template.
+training_config: runs/sft/config.json
+robot_config: configs/robots/flexiv.yaml
+norm_stats: assets/task/norm_stats.json
+actor_init: runs/sft/sft.pt
+adapter: capo.robots.flexiv_client:create
+reward_config: configs/workflow/reward.yaml
+episodes_per_round: 1
+min_new_records: 1
+train_processes: 8
+training:
+  output: runs/online
+  replay: data/online/replay
+  rounds: 100
+  critic_warmup_steps: 200
+  critic_steps_per_round: 198
+  actor_steps_per_round: 100

@@ -1,0 +1,9 @@
+# First collect raw experts, then compute OpenPI statistics and prepare SFT samples.
+training_config: configs/workflow/sft.yaml
+robot_config: configs/robots/flexiv.yaml
+adapter: capo.robots.flexiv_client:create
+input: data/demonstrations/raw
+output: data/demonstrations/prepared
+norm_stats: assets/task/norm_stats.json
+task: Perform the configured task.
+quantile: true
