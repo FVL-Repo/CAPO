@@ -133,9 +133,7 @@ python -m capo.serve --config assets/capo_export/capo_config.json \
 
 Set `device` in the exported configuration to `cuda` for GPU inference. Use your task's normalization path in both commands.
 
-## Acknowledgments
-
-Thanks to [OpenPI](https://github.com/Physical-Intelligence/openpi) for the backbone, [VLA-Precision](https://github.com/scy-v/VLA-Precision) for the critic/training reference, [QAM](https://github.com/ColinQiyangLi/qam) for adjoint matching, [SERL](https://github.com/rail-berkeley/serl) for the encoder, and HIL-RL for robot and reward workflow references.
+## License
 
 [Apache-2.0](LICENSE). Upstream terms remain applicable: [critic reference](third_party/licenses/VLA_PRECISION_LICENSE), [adjoint reference](third_party/licenses/QAM_LICENSE), [encoder](third_party/licenses/SERL_LICENSE), [robot integration](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).
 
