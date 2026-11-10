@@ -11,4 +11,4 @@ The vendored OpenPI subset has local modifications for image-key configuration, 
 
 Downloaded pi_05 checkpoints and PaliGemma assets are provided by their original publishers and retain the applicable OpenPI/Gemma/model terms. The ResNet encoder download is the upstream pretrained release and is verified by SHA-256 before deserialization. Robot SDKs are installed separately under vendor terms. The project's Apache-2.0 license does not replace any of these upstream terms.
 
-Reference projects, adapted robot code, encoder sources, and their retained licenses are listed in the [README acknowledgments](README.md#acknowledgments).
+Retained licenses for reference projects, adapted robot code, and encoder sources are listed in the [README license section](README.md#license).
