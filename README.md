@@ -1,14 +1,14 @@
 <div align="center">
 
-# CAPO
+# CAPO — ICLR Submission 26906
 
 **Real-World Reinforcement Learning for VLA via Corrective Adjoint Policy Optimization**
 
-[Project Page](https://fvl-repo.github.io/CAPO-Website/) · [Method](#method) · [Setup](#setup) · [Contact](#contact)
+[Method](#method) · [Setup](#setup)
 
 </div>
 
-[![CAPO overview: learning from human interventions through corrective value learning and adjoint-based policy optimization](docs/figures/teaser.png)](docs/figures/teaser.pdf)
+![CAPO overview: learning from human interventions through corrective value learning and adjoint-based policy optimization](docs/figures/teaser.png)
 
 <p align="center"><b>CAPO</b> turns human corrective experience into informative action values and uses this guidance to improve the VLA’s native flow policy.</p>
 
@@ -20,7 +20,7 @@ Human-in-the-Loop Reinforcement Learning (HiL-RL) offers a practical route for a
 
 CAPO starts from a task-adapted VLA, collects human-assisted experience, and alternates critic learning with updates to the flow action expert.
 
-[![CAPO method: task adaptation, human-assisted interaction, and alternating CVL and APO updates](docs/figures/method.png)](docs/figures/method.pdf)
+![CAPO method: task adaptation, human-assisted interaction, and alternating CVL and APO updates](docs/figures/method.png)
 
 - **Corrective Value Learning (CVL).** Combine temporal-difference learning on executed transitions with preference ranking between human corrections and the policy proposals they replace.
 - **Adjoint-based Policy Optimization (APO).** Carry action-value gradients backward along native flow trajectories to construct local velocity targets, with a phase-wise reference and terminal-interval matching.
@@ -139,8 +139,3 @@ Thanks to [OpenPI](https://github.com/Physical-Intelligence/openpi) for the back
 
 [Apache-2.0](LICENSE). Upstream terms remain applicable: [critic reference](third_party/licenses/VLA_PRECISION_LICENSE), [adjoint reference](third_party/licenses/QAM_LICENSE), [encoder](third_party/licenses/SERL_LICENSE), [robot integration](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).
 
-## Contact
-
-Maintained by [zgj77](https://github.com/zgj77) in [FVL-Repo](https://github.com/FVL-Repo).
-
-For questions about CAPO, please contact **Guojin Zhong** at [gjzhong25@m.fudan.edu.cn](mailto:gjzhong25@m.fudan.edu.cn).
