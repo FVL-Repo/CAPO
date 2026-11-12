@@ -34,7 +34,7 @@ CAPO starts from a task-adapted VLA, collects human-assisted experience, and alt
 | Human-assisted collection and online workflow | [collect.py](src/capo/collect.py), [workflow.py](src/capo/workflow.py) |
 | OpenPI π₀.₅ backbone and expert adaptation | [backbone.py](src/capo/backbone.py), [lora.py](src/capo/lora.py) |
 
-This repository provides CAPO with an OpenPI π₀.₅ backbone, expert LoRA, and a Flexiv interface. All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
+This repository provides CAPO with an OpenPI π₀.₅ backbone, full action-expert SFT with a frozen VLM, optional expert LoRA, and a Flexiv interface. All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
 
 ## Setup
 
@@ -74,7 +74,7 @@ Follow [OpenPI's fine-tuning guide](https://github.com/Physical-Intelligence/ope
 | --- | --- |
 | `configs/robots/flexiv.yaml` | Robot/camera IDs, workspace, reset pose, teleoperation, task |
 | `configs/workflow/dataset.yaml` | Adapter, data paths, task, normalization |
-| `configs/workflow/sft.yaml` | Base weights, dimensions, horizons, LoRA, batch size, schedule |
+| `configs/workflow/sft.yaml` | Base weights, dimensions, horizons, full action-expert tuning, batch size, schedule |
 
 Start the [robot server](docs/robot.md), then collect and prepare demonstrations:
 
@@ -87,6 +87,8 @@ torchrun --standalone --nproc-per-node=8 -m capo.sft \
 ```
 
 `prepare` computes normalization with OpenPI's `RunningStats`. Add `--existing-norm` to reuse matching task statistics. Existing demonstrations can use the [NPZ format](docs/data.md).
+
+SFT freezes the VLM and trains all action-expert parameters together with the action input/output projections and time MLPs (`actor_tuning: full`, `train_action_time_projections: true`). No LoRA adapters are used in the default SFT configuration.
 
 SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 256, microbatch 32 per GPU on eight GPUs. Adjust these for your hardware.
 
