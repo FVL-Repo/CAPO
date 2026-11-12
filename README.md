@@ -135,5 +135,8 @@ Set `device` in the exported configuration to `cuda` for GPU inference. Use your
 
 ## License
 
-[Apache-2.0](LICENSE). Upstream terms remain applicable: [critic reference](third_party/licenses/VLA_PRECISION_LICENSE), [adjoint reference](third_party/licenses/QAM_LICENSE), [encoder](third_party/licenses/SERL_LICENSE), [robot integration](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).
+CAPO is distributed under [Apache-2.0](LICENSE). Third-party code and assets remain subject to their applicable licenses and attribution notices; the project license does not replace those terms.
 
+Retained third-party notices: [VLA-Precision license](third_party/licenses/VLA_PRECISION_LICENSE), [QAM license](third_party/licenses/QAM_LICENSE), [SERL license](third_party/licenses/SERL_LICENSE), [robot integration license](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).
+
+These links identify license notices. They do not, by themselves, establish either identical or independent implementations. Methodological similarities, implementation differences, and any code reuse should be described separately and specifically.
