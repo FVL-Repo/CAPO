@@ -1,4 +1,4 @@
-# OpenPI pi05 base + expert LoRA SFT. Global batch 256 / 8 GPUs = 32 per GPU.
+# OpenPI pi05 base + full action-expert SFT; VLM frozen. Global batch 256 / 8 GPUs = 32 per GPU.
 backend: pi05
 seed: 42
 device: cuda
@@ -63,9 +63,7 @@ critic_resnet_weights: assets/resnet10.safetensors
 critic_visual_dim: 256
 critic_proprio_dim: 64
 critic_spatial_blocks: 8
-actor_tuning: lora
-lora_rank: 32
-lora_alpha: 16.0
+actor_tuning: full
 train_action_time_projections: true
 replay_capacity: 100000
 replay_cache_shards: 8
