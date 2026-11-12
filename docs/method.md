@@ -1,6 +1,6 @@
 # Training design
 
-The pi_05 VLM and base expert weights are frozen. Expert attention/MLP LoRA and configured action/time projections are trainable. Trainable storage and Adam moments use FP32; model matrix operations use the configured precision.
+The default SFT configuration freezes the pi_05 VLM and trains all action-expert parameters, including the action input/output projections and time MLPs (`actor_tuning: full`, `train_action_time_projections: true`). SFT does not insert LoRA adapters. The online workflow loads the saved SFT configuration and therefore preserves this tuning mode. Optional `actor_tuning: lora` freezes the base expert and trains expert attention/MLP LoRA plus the configured action/time projections; switching modes requires an explicit checkpoint migration. Trainable storage and Adam moments use FP32; model matrix operations use the configured precision.
 
 The critic directly predicts an ensemble of Q values. Each camera passes through a shared frozen ResNet-10 encoder and its own trainable spatial pooling layer; visual features, projected proprioception, and masked executed action chunks feed independent Q heads. There is no V/A decomposition.
 
