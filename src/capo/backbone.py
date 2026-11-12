@@ -118,7 +118,7 @@ class Pi05(nn.Module):
         if cfg.actor_tuning == "lora":
             inject_expert_lora(self.model.paligemma_with_expert.gemma_expert, cfg.lora_rank, cfg.lora_alpha)
         else:
-            self.model.paligemma_with_expert.gemma_expert.float()
+            self.model.paligemma_with_expert.gemma_expert.float().requires_grad_(True)
         for name in ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"):
             getattr(self.model, name).float().requires_grad_(cfg.train_action_time_projections)
         self.model.eval()
