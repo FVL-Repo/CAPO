@@ -59,14 +59,13 @@ class Config:
     cutoff: float = 0.5
     cutoff_rule: str = "ceil"
     apo_time_samples: int = 5
-    batch_size: int = 256
+    batch_size: int = 240
     microbatch_size: int = 1
-    replay_mixture: tuple = (0.4, 0.4, 0.2)
-    bc_correction_fraction: float = 0.5
+    replay_mixture: tuple = (0.4, 0.4, 0.2)  
     critic_warmup_steps: int = 200
-    critic_steps_per_round: int = 100
-    actor_steps_per_round: int = 100
-    rounds: int = 10
+    max_actor_steps: int = 10000
+    reference_refresh_interval: int = 500
+    policy_publish_interval: int = 100
     sft_steps: int = 10000
     critic_lr: float = 3e-5
     actor_lr: float = 2e-5
@@ -84,6 +83,11 @@ class Config:
     grad_clip: float | None = None
 
     def validate(self):
+        if not isinstance(self.critic_warmup_steps, int) or self.critic_warmup_steps < 0:
+            raise ValueError("critic_warmup_steps must be a nonnegative integer")
+        for key in ("max_actor_steps", "reference_refresh_interval", "policy_publish_interval"):
+            if not isinstance(getattr(self, key), int) or getattr(self, key) < 1:
+                raise ValueError(f"{key} must be a positive integer")
         if self.replay_capacity < 1 or self.replay_cache_shards < 1:
             raise ValueError("Replay capacity/cache must be positive")
         if self.action_semantics != "command":
@@ -118,9 +122,9 @@ class Config:
             "critic_proprio_dim",
             "critic_spatial_blocks",
             "td_samples",
-            "rounds",
-            "critic_steps_per_round",
-            "actor_steps_per_round",
+            "max_actor_steps",
+            "reference_refresh_interval",
+            "policy_publish_interval",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -137,7 +141,9 @@ class Config:
             or min(self.replay_mixture) < 0
             or abs(sum(self.replay_mixture) - 1) > 1e-6
         ):
-            raise ValueError("replay_mixture must be three nonnegative weights summing to one")
+            raise ValueError("replay_mixture must be demo/exec/inter weights summing to one")
+        if sum(self.replay_mixture[:2]) <= 0:
+            raise ValueError("Actor sampling requires positive demo/exec weight")
         if (
             self.eta <= 0
             or self.alpha_q <= 0
@@ -146,13 +152,16 @@ class Config:
             or self.margin < 0
         ):
             raise ValueError("invalid loss scale")
-        if not 0 <= self.bc_correction_fraction <= 1:
-            raise ValueError("invalid BC mixture")
         return self
 
     @classmethod
     def load(cls, path):
         data = load_mapping(path)
+        legacy = {"rounds", "critic_steps_per_round", "actor_steps_per_round"} & data.keys()
+        if legacy:
+            raise ValueError(f"Remove episode-round scheduling fields {legacy}; use max_actor_steps and reference_refresh_interval")
+        if "bc_correction_fraction" in data:
+            raise ValueError("Remove bc_correction_fraction: BC now selects only demo-buffer samples from the shared batch")
         unknown = set(data) - {f.name for f in fields(cls)}
         if unknown:
             raise ValueError(f"Unknown config fields: {unknown}")

@@ -1,8 +1,5 @@
-# enabled=false: manual Enter success; enabled=true: model success with operator review.
-# Interactive rewards are fixed: ordinary step -0.05, confirmed success 10.
 enabled: false
 interactive: true
-# Set init_checkpoint to an existing classifier.pt to fine-tune on appended hard examples.
 init_checkpoint: null
 dataset: data/reward/train
 validation: data/reward/validation

@@ -1,268 +1,199 @@
+"""Continuous collection and a persistent learner; no episode-based learning rounds."""
 import argparse
 from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 
 import torch
 
 from capo.config import Config, ROOT, local_path
 from capo.identity import file_sha256, canonical
 from capo.processing import Processor
-from capo.replay import Replay
+from capo.replay import REPLAY_LAYOUT
+from capo.imitation import TRAINING_OBJECTIVE
+from capo.schedule import TRAINING_SCHEDULE, training_complete
+from capo.exchange import atomic_json, publish_checkpoint
 
 
-def atomic_json(path, value):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
+def stop_child(process, stop_file):
+    if process is None or process.poll() is not None:
+        return
+    stop_file.touch()
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
 
 
-def publish(checkpoint, output):
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    artifact = {"format_version": 1, "config": payload["config"], "actor": payload["actor"]}
-    path = output / (checkpoint.parent.name + "_actor.pt")
-    if path.exists():
-        raise FileExistsError(f"Refusing to overwrite published policy {path}")
-    temporary = path.with_suffix(".tmp")
-    torch.save(artifact, temporary)
-    temporary.replace(path)
-    digest = file_sha256(path)
-    atomic_json(output / "policy.json", {"checkpoint": str(path), "sha256": digest})
-    return str(path), digest
-
-
-def training_complete(payload, config):
-    return (
-        payload["phase"] == "idle"
-        and payload["round"] == config.rounds
-        and payload["actor_step"] == config.rounds * config.actor_steps_per_round
-        and payload["critic_step"]
-        == config.critic_warmup_steps + config.rounds * config.critic_steps_per_round
-    )
-
-
-def run(
-    cfg,
-    *,
-    norm_stats,
-    adapter,
-    actor_init=None,
-    reward_config=None,
-    episodes_per_round=1,
-    min_new_records=1,
-    train_processes=1,
-):
+def run(cfg, **kwargs):
+    
+    import fcntl
     output = local_path(cfg.output)
     output.mkdir(parents=True, exist_ok=True)
-    if episodes_per_round < 1 or min_new_records < 1 or train_processes < 1:
-        raise ValueError("Invalid online collection/training budget")
-    processor = Processor(
-        cfg, norm_stats, quantile=(cfg.data_spec or {}).get("normalization_mode", "quantile") == "quantile"
-    )
+    with (output / 'online.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _run(cfg, **kwargs)
+
+
+def _run(cfg, *, norm_stats, adapter, actor_init=None, reward_config=None,
+         train_processes=1, collector_device='cuda:0', checkpoint_interval=100):
+    cfg.validate()
+    if train_processes < 1 or checkpoint_interval < 1:
+        raise ValueError('Invalid process/checkpoint settings')
+    output = local_path(cfg.output)
+    processor = Processor(cfg, norm_stats,
+                          quantile=(cfg.data_spec or {}).get('normalization_mode', 'quantile') == 'quantile')
     del processor
-    if cfg.backend == "pi05":
-        digest = file_sha256(local_path(cfg.checkpoint))
-        if cfg.base_sha256 and cfg.base_sha256 != digest:
-            raise ValueError("Base checkpoint changed")
-        cfg.base_sha256 = digest
+    digest = file_sha256(local_path(cfg.checkpoint))
+    if cfg.base_sha256 and cfg.base_sha256 != digest:
+        raise ValueError('Base checkpoint changed')
+    cfg.base_sha256 = digest
     reward_identity = None
     if reward_config:
         from capo.reward import load_reward_config
-
         reward = load_reward_config(reward_config)
-        reward_identity = {
-            "config": reward,
-            "sha256": file_sha256(local_path(reward["checkpoint"])) if reward.get("enabled") else None,
-        }
-    identity = {
-        "config": cfg.__dict__,
-        "reward": reward_identity,
-        "norm_stats": file_sha256(local_path(norm_stats)),
-        "adapter": adapter,
-        "train_processes": train_processes,
-        "episodes_per_round": episodes_per_round,
-        "min_new_records": min_new_records,
-        "actor_init": str(local_path(actor_init)) if actor_init else None,
-        "actor_init_sha256": file_sha256(local_path(actor_init)) if actor_init else None,
-    }
-    identity = json.loads(canonical(identity))
-    state_path = output / "online_state.json"
+        reward_identity = {'config': reward,
+                           'sha256': file_sha256(local_path(reward['checkpoint'])) if reward.get('enabled') else None}
+    identity = json.loads(canonical({
+        'mode': 'continuous_online_v1', 'replay_layout': REPLAY_LAYOUT,
+        'training_objective': TRAINING_OBJECTIVE, 'training_schedule': TRAINING_SCHEDULE,
+        'config': cfg.__dict__, 'norm_stats': file_sha256(local_path(norm_stats)),
+        'adapter': adapter, 'train_processes': train_processes, 'collector_device': collector_device,
+        'reward': reward_identity, 'checkpoint_interval': checkpoint_interval,
+        'actor_init': str(local_path(actor_init)) if actor_init else None,
+        'actor_init_sha256': file_sha256(local_path(actor_init)) if actor_init else None,
+    }))
+    state_path = output / 'online_state.json'
+    target = output / 'latest.pt'
+    state = {'identity': identity, 'phase': 'starting'}
     if state_path.exists():
         state = json.loads(state_path.read_text())
-        if state["identity"] != identity:
-            raise ValueError("Online run configuration changed; create a new output directory")
-        if state.get("policy") and file_sha256(state["policy"]) != state["policy_sha256"]:
-            raise ValueError("Published policy changed")
+        previous = json.loads(canonical(state['identity']))
+        current = json.loads(canonical(identity))
+        old_budget = previous['config'].pop('max_actor_steps', None)
+        new_budget = current['config'].pop('max_actor_steps')
+        if previous != current or old_budget is None or new_budget < old_budget:
+            raise ValueError('Online run configuration changed; only increasing max_actor_steps is allowed')
+        if state['phase'] == 'complete' and old_budget == new_budget:
+            payload = torch.load(target, map_location='cpu', weights_only=True)
+            if not training_complete(payload, cfg):
+                raise ValueError('Completed learner checkpoint does not match requested schedule')
+            if file_sha256(state['policy']) != state['policy_sha256']:
+                raise ValueError('Published policy changed')
+            return state
+    state.update(identity=identity, phase='starting', training_checkpoint=str(target))
+    atomic_json(state_path, state)
+    initial = target if target.exists() else (local_path(actor_init) if actor_init else None)
+    if initial:
+        
+        from capo.checkpoints import check_actor_config
+        from types import SimpleNamespace
+        payload = torch.load(initial, map_location='cpu', weights_only=True)
+        check_actor_config(SimpleNamespace(cfg=cfg), payload['config'])
+        if target.exists() and payload.get('training_schedule') != TRAINING_SCHEDULE:
+            raise ValueError('Existing learner checkpoint uses a different schedule')
+        publication = publish_checkpoint(initial, output)
+        del payload
     else:
-        if actor_init:
-            initial = local_path(actor_init)
-            from capo.checkpoints import check_actor_config
-            from types import SimpleNamespace
-
-            payload = torch.load(initial, map_location="cpu", weights_only=True)
-            check_actor_config(SimpleNamespace(cfg=cfg), payload["config"])
-            state = {
-                "identity": identity,
-                "phase": "publish",
-                "round": 0,
-                "training_checkpoint": str(initial),
-            }
-        else:
-            state = {"identity": identity, "phase": "collect", "round": 0, "policy": None}
+        
+        from capo.backbone import make_backbone
+        from capo.exchange import publish_actor
+        base_actor = make_backbone(replace(cfg, device='cpu'))
+        publication = publish_actor(base_actor, cfg, output, 0)
+        del base_actor
+    state.update(policy=publication['checkpoint'], policy_sha256=publication['sha256'])
+    cfg.save(output / 'train_config.json')
+    replace(cfg, device=collector_device).save(output / 'collect_config.json')
+    stop_collection, stop_training = output / 'STOP_COLLECTION', output / 'STOP_TRAINING'
+    stop_collection.unlink(missing_ok=True)
+    stop_training.unlink(missing_ok=True)
+    environment = {**os.environ, 'PYTHONPATH': str(ROOT / 'src')}
+    collect = [sys.executable, '-m', 'capo.collect', '--config', str(output / 'collect_config.json'),
+               '--norm-stats', str(norm_stats), '--adapter', adapter, '--continuous',
+               '--policy-pointer', str(output / 'policy.json'), '--stop-file', str(stop_collection)]
+    if (cfg.data_spec or {}).get('normalization_mode') == 'mean_std':
+        collect.append('--mean-std')
+    if reward_config:
+        collect += ['--reward-config', str(reward_config)]
+    train = [sys.executable, '-m']
+    if train_processes > 1:
+        from capo.distributed import local_launch_args
+        train += ['torch.distributed.run', *local_launch_args(train_processes), '-m']
+    train += ['capo.train', '--config', str(output / 'train_config.json'), '--streaming',
+              '--save-every', str(checkpoint_interval), '--publish-dir', str(output),
+              '--stop-file', str(stop_training)]
+    if initial:
+        train += ['--resume' if target.exists() else '--actor-init', str(initial)]
+    collector = learner = None
+    try:
+        with (output / 'collector.log').open('a') as c_log, (output / 'learner.log').open('a') as l_log:
+            collector = subprocess.Popen(collect, cwd=ROOT, env=environment, stdout=c_log,
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+            learner = subprocess.Popen(train, cwd=ROOT, env=environment, stdout=l_log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            state.update(phase='running')
+            atomic_json(state_path, state)
+            while learner.poll() is None:
+                if collector.poll() is not None:
+                    raise RuntimeError(f'Continuous collector exited early ({collector.returncode}); see collector.log')
+                time.sleep(.5)
+            if learner.returncode:
+                raise RuntimeError(f'Learner failed ({learner.returncode}); see learner.log')
+            stop_child(collector, stop_collection)
+            if collector.returncode:
+                raise RuntimeError(f'Collector failed during shutdown ({collector.returncode})')
+        payload = torch.load(target, map_location='cpu', weights_only=True)
+        if not training_complete(payload, cfg):
+            raise RuntimeError('Learner stopped before the requested actor update budget')
+        publication = json.loads((output / 'policy.json').read_text())
+        if publication['actor_step'] != cfg.max_actor_steps or file_sha256(publication['checkpoint']) != publication['sha256']:
+            raise ValueError('Final publication is incomplete or corrupt')
+        state.update(phase='complete', actor_step=payload['actor_step'], critic_step=payload['critic_step'],
+                     reference_actor_step=payload['reference_actor_step'],
+                     reference_refresh_count=payload['reference_refresh_count'],
+                     policy=publication['checkpoint'], policy_sha256=publication['sha256'])
         atomic_json(state_path, state)
-
-    def invoke(command, config, stage):
-        path = output / f"{stage}_config.json"
-        config.save(path)
-        with (output / "online.log").open("a") as log:
-            subprocess.run(
-                command + ["--config", str(path)],
-                cwd=ROOT,
-                env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
-
-    def collect(config):
-        command = [
-            sys.executable,
-            "-m",
-            "capo.collect",
-            "--norm-stats",
-            str(norm_stats),
-            "--adapter",
-            adapter,
-            "--episodes",
-            str(episodes_per_round),
-        ]
-        if (cfg.data_spec or {}).get("normalization_mode") == "mean_std":
-            command.append("--mean-std")
-        if state.get("policy"):
-            command += ["--checkpoint", state["policy"]]
-        if reward_config:
-            command += ["--reward-config", str(reward_config)]
-        invoke(command, config, "collect")
-
-    def train(config):
-        command = [sys.executable, "-m"]
-        if train_processes > 1:
-            command += ["torch.distributed.run", "--standalone", f"--nproc-per-node={train_processes}", "-m"]
-        command += ["capo.train", "--save-every", "1"]
-        target = local_path(config.output) / "latest.pt"
-        if target.exists():
-            payload = torch.load(target, map_location="cpu", weights_only=True)
-            if training_complete(payload, config):
-                return target
-            command += ["--resume", str(target)]
-        elif state.get("training_checkpoint"):
-            command += ["--actor-init" if state["round"] == 0 else "--resume", state["training_checkpoint"]]
-        invoke(command, config, "train")
-        payload = torch.load(target, map_location="cpu", weights_only=True)
-        if not training_complete(payload, config):
-            raise RuntimeError("Training did not reach the requested update count")
-        return target
-
-    while state["round"] < cfg.rounds:
-        phase = state["phase"]
-        if phase == "publish":
-            target = Path(state["training_checkpoint"])
-            path = output / (target.parent.name + "_actor.pt")
-            if path.exists():
-                old = torch.load(path, map_location="cpu", weights_only=True)
-                current = torch.load(target, map_location="cpu", weights_only=True)
-                if canonical(old["config"]) != canonical(current["config"]) or any(
-                    not torch.equal(v, current["actor"][k]) for k, v in old["actor"].items()
-                ):
-                    raise ValueError("Existing publication differs from completed training")
-                policy, digest = str(path), file_sha256(path)
-            else:
-                policy, digest = publish(target, output)
-            state.update(policy=policy, policy_sha256=digest, phase="collect")
-        elif phase == "collect":
-            before = Replay(cfg)
-            before.refresh(local_path(cfg.replay))
-            count = sum(1 for _ in before.manifest)
-            collect(cfg)
-            after = Replay(cfg)
-            after.refresh(local_path(cfg.replay))
-            new = after.loaded - before.loaded
-            new_records = sum(len(torch.load(p, weights_only=True)["records"]) for p in new)
-            if new_records < min_new_records:
-                raise RuntimeError(
-                    f"Only {new_records} new valid records; minimum={min_new_records}; training not started"
-                )
-            state.update(
-                phase="train", collected_shards=len(after.manifest) - count, collected_records=new_records
-            )
-        elif phase == "train":
-            round_cfg = replace(
-                cfg, rounds=state["round"] + 1, output=str(output / f"round_{state['round'] + 1:04d}")
-            )
-            target = train(round_cfg)
-            state.update(training_checkpoint=str(target), round=state["round"] + 1, phase="publish")
-        else:
-            raise ValueError(f"Unknown online phase {phase}")
+        return state
+    except BaseException as error:
+        state.update(phase='interrupted', error=type(error).__name__ + ': ' + str(error))
         atomic_json(state_path, state)
-    if state["phase"] == "publish":
-        target = Path(state["training_checkpoint"])
-        path = output / (target.parent.name + "_actor.pt")
-        if not path.exists():
-            policy, digest = publish(target, output)
-        else:
-            saved = torch.load(path, map_location="cpu", weights_only=True)
-            current = torch.load(target, map_location="cpu", weights_only=True)
-            if canonical(saved["config"]) != canonical(current["config"]) or any(
-                not torch.equal(v, current["actor"][k]) for k, v in saved["actor"].items()
-            ):
-                raise ValueError("Final publication differs from completed training")
-            policy, digest = str(path), file_sha256(path)
-        state.update(policy=policy, policy_sha256=digest, phase="complete")
-        atomic_json(state_path, state)
-    return state
+        raise
+    finally:
+        
+        stop_collection.touch()
+        stop_training.touch()
+        stop_child(collector, stop_collection)
+        stop_child(learner, stop_training)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--norm-stats", required=True)
-    parser.add_argument("--adapter", required=True)
-    parser.add_argument("--reward-config")
-    parser.add_argument(
-        "--actor-init", help="Offline SFT delta; omit only for an external full OpenPI SFT base"
-    )
-    parser.add_argument("--episodes-per-round", type=int, default=1)
-    parser.add_argument("--min-new-records", type=int, default=1)
-    parser.add_argument("--train-processes", type=int, default=1)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--norm-stats', required=True)
+    parser.add_argument('--adapter', required=True)
+    parser.add_argument('--reward-config')
+    parser.add_argument('--actor-init')
+    parser.add_argument('--train-processes', type=int, default=1)
+    parser.add_argument('--collector-device', default='cuda:0')
+    parser.add_argument('--checkpoint-interval', type=int, default=100)
     args = parser.parse_args()
     cfg = Config.load(local_path(args.config))
-    if args.adapter == "capo.robots.flexiv_client:create":
+    if args.adapter == 'capo.robots.flexiv_client:create':
         from capo.identity import bind_robot
         from capo.robots.flexiv_config import load_config
-
-        bind_robot(
-            cfg,
-            load_config(local_path(os.environ.get("CAPO_FLEXIV_CONFIG", "configs/robots/flexiv.yaml"))),
-        )
-    print(
-        json.dumps(
-            run(
-                cfg,
-                norm_stats=args.norm_stats,
-                adapter=args.adapter,
-                actor_init=args.actor_init,
-                reward_config=args.reward_config,
-                episodes_per_round=args.episodes_per_round,
-                min_new_records=args.min_new_records,
-                train_processes=args.train_processes,
-            ),
-            indent=2,
-        )
-    )
+        bind_robot(cfg, load_config(local_path(os.environ.get('CAPO_FLEXIV_CONFIG', 'configs/robots/flexiv.yaml'))))
+    print(json.dumps(run(cfg, **{k:v for k,v in vars(args).items() if k != 'config'}), indent=2))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

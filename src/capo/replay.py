@@ -1,6 +1,6 @@
 from pathlib import Path
 import random
-import warnings
+import math
 from collections import OrderedDict
 
 from capo.identity import file_sha256, check_spec, canonical
@@ -8,8 +8,11 @@ from capo.identity import file_sha256, check_spec, canonical
 import torch
 
 from capo.batching import stack_trees, tree_map
+from capo.imitation import bc_eligible
 
 SOURCES = ("demonstration", "correction", "autonomous")
+BUFFERS = ("demo", "exec", "inter")
+REPLAY_LAYOUT = "demo_exec_inter_v1"
 
 
 def validate_record(record, cfg):
@@ -95,11 +98,11 @@ class RecordStore:
             return entry["memory"]
         path = entry["path"]
         if path not in self.cache:
-            self.cache[path] = torch.load(path, map_location="cpu", weights_only=True)["records"]
+            self.cache[path] = torch.load(path, map_location="cpu", weights_only=True)
             if len(self.cache) > self.cache_size:
                 self.cache.popitem(last=False)
         self.cache.move_to_end(path)
-        return self.cache[path][entry["offset"]]
+        return self.cache[path][entry.get("record_key", "records")][entry["offset"]]
 
 
 class Replay:
@@ -109,10 +112,21 @@ class Replay:
         self.manifest = []
         self.semantic_metadata = None
         self.groups = {s: [] for s in SOURCES}
-        self.pairs = []
+        self.buffers = {s: [] for s in BUFFERS}
         self.loaded = set()
         self.rng = random.Random(cfg.seed)
-        self.warned = set()
+
+    @property
+    def pairs(self):
+        return self.buffers["inter"]
+
+    @staticmethod
+    def membership(record):
+        if record["source"] == "demonstration":
+            return ("demo",)
+        if record["source"] == "autonomous":
+            return ("exec",)
+        return ("demo", "exec", "inter") if "rejected_actions" in record else ("demo", "exec")
 
     def add(self, record, *, location=None):
         validate_record(record, self.cfg)
@@ -143,43 +157,79 @@ class Replay:
         i = len(self.records)
         self.records.entries.append(location)
         self.groups[record["source"]].append(i)
-        if "rejected_actions" in record:
-            self.pairs.append(i)
-        if len(self.records) > self.cfg.replay_capacity:
-            weights = dict(zip(SOURCES, self.cfg.replay_mixture))
-            eligible = [s for s in SOURCES if len(self.groups[s]) > 1]
-            source = max(
-                eligible or [record["source"]],
-                key=lambda s: len(self.groups[s]) - self.cfg.replay_capacity * weights[s],
-            )
-            self.records.entries.pop(self.groups[source][0])
+        evicted = False
+        for name in self.membership(record):
+            self.buffers[name].append(i)
+            if len(self.buffers[name]) > self.cfg.replay_capacity:
+                self.buffers[name].pop(0)
+                evicted = True
+        if evicted:
+            
+            retained = sorted(set().union(*map(set, self.buffers.values())))
+            remap = {old: new for new, old in enumerate(retained)}
+            self.records.entries = [self.records.entries[j] for j in retained]
+            self.buffers = {k: [remap[j] for j in ids] for k, ids in self.buffers.items()}
             self._reindex()
 
     def _reindex(self):
         self.groups = {s: [] for s in SOURCES}
-        self.pairs = []
         for i, entry in enumerate(self.records.entries):
             self.groups[entry["source"]].append(i)
-            if entry["pair"]:
-                self.pairs.append(i)
 
     def snapshot(self):
         return {
+            "layout": REPLAY_LAYOUT,
+            "buffers": {k: list(v) for k, v in self.buffers.items()},
             "manifest": self.manifest,
             "entries": self.records.entries,
             "semantic_metadata": self.semantic_metadata,
         }
 
     def restore_snapshot(self, state):
+        if state.get("layout") != REPLAY_LAYOUT:
+            raise ValueError("Legacy source-mixture replay cannot resume as three buffers; use --actor-init")
         for item in state["manifest"]:
             if file_sha256(item["path"]) != item["sha256"]:
                 raise ValueError(f"Replay shard changed since checkpoint: {item['path']}")
         self.manifest = state["manifest"]
         self.loaded = {item["path"] for item in self.manifest}
         self.records.entries = state["entries"]
+        self.buffers = {k: list(state["buffers"][k]) for k in BUFFERS}
         self.records.cache.clear()
         self.semantic_metadata = state["semantic_metadata"]
         self._reindex()
+
+    def load_demonstrations(self):
+        """Load actual offline transitions; BC-only data cannot supply fabricated TD targets."""
+        if not self.cfg.demonstrations:
+            return
+        from capo.config import local_path
+        import json
+
+        root = local_path(self.cfg.demonstrations)
+        manifest = json.loads((root / "manifest.json").read_text())
+        check_spec(self.cfg, manifest["data_spec"])
+        if manifest.get("td_transitions", 0) != sum(s["count"] for s in manifest["shards"]):
+            raise ValueError("Offline demo buffer needs rewards, next observations and boundaries; "
+                             "re-prepare transition-complete demonstrations (legacy BC-only data is insufficient)")
+        for key in ("action_horizon", "execution_horizon", "action_dim", "robot_action_dim", "gamma"):
+            if manifest.get("transition_metadata", {}).get(key) != getattr(self.cfg, key):
+                raise ValueError(f"Offline demo/config mismatch for {key}; re-prepare the dataset")
+        for item in manifest["shards"]:
+            path = local_path(root / item["file"])
+            if str(path) in self.loaded:
+                continue
+            if file_sha256(path) != item["sha256"]:
+                raise ValueError("Offline demonstration shard changed")
+            shard = torch.load(path, map_location="cpu", weights_only=True)
+            if len(shard.get("transitions", [])) != item["count"]:
+                raise ValueError("Offline shard must supply one TD transition per demonstration")
+            for offset, record in enumerate(shard["transitions"]):
+                if record["source"] != "demonstration":
+                    raise ValueError("Offline dataset contains a non-demonstration transition")
+                self.add(record, location={"path": str(path), "offset": offset, "record_key": "transitions"})
+            self.loaded.add(str(path))
+            self.manifest.append({"path": str(path), "sha256": item["sha256"]})
 
     def refresh(self, directory):
         from capo import distributed as parallel
@@ -207,38 +257,49 @@ class Replay:
             self.loaded.add(str(path))
             self.manifest.append({"path": str(path), "sha256": digest})
 
-    def sample(self, count, view="exec", *, cfg=None, start=0, end=None):
+    def sample(self, count, view="cvl", *, cfg=None, start=0, end=None):
         cfg = cfg or self.cfg
-        if view == "pair":
-            if not self.pairs:
-                return None
-            indices = self.rng.choices(self.pairs, k=count)
+        if view in ("cvl", "actor"):
+            weights = list(cfg.replay_mixture)
         else:
-            weights = (
-                list(cfg.replay_mixture)
-                if view == "exec"
-                else [1 - cfg.bc_correction_fraction, cfg.bc_correction_fraction, 0]
+            name = {"bc": "demo", "pair": "inter"}.get(view, view)
+            if name not in BUFFERS:
+                raise ValueError(f"Unknown replay view: {view}")
+            weights = [float(k == name) for k in BUFFERS]
+        counts = [round(count * w) for w in weights]
+        if sum(counts) != count or any(not math.isclose(count * w, n, abs_tol=1e-8)
+                                       for w, n in zip(weights, counts)):
+            raise ValueError("Batch size must realize the exact demo/exec/inter ratio; "
+                             "use a multiple of 5 (and the GPU world size) for 40/40/20")
+        choices = []
+        for buffer_id, (name, n) in enumerate(zip(BUFFERS, counts)):
+            if n and not self.buffers[name]:
+                raise ValueError(f"{name} buffer is empty; collect/import data before sampling (no renormalization)")
+            choices.extend((i, buffer_id) for i in self.rng.choices(self.buffers[name], k=n))
+        self.rng.shuffle(choices)
+        
+        
+        bc_count = sum(bc_eligible(b)
+                       for i, b in choices)
+        apo_count = sum(b != 2 for _, b in choices)
+        samples = []
+        for i, buffer_id in choices[start:end]:
+            source_id = SOURCES.index(self.records.entries[i]["source"])
+            use_bc = bc_eligible(buffer_id)
+            sample = tensor_record(self.records[i], cfg)
+            sample.update(
+                buffer_id=torch.tensor(buffer_id),
+                source_id=torch.tensor(source_id),
+                bc_mask=torch.tensor(use_bc),
+                bc_weight=torch.tensor(count / bc_count if use_bc else 0.0),
+                apo_mask=torch.tensor(buffer_id != 2),
+                apo_weight=torch.tensor(count / apo_count if buffer_id != 2 else 0.0),
+                record_index=torch.tensor(i),
+                ranking_mask=torch.tensor(buffer_id == 2),
+                ranking_weight=torch.tensor(count / counts[2] if buffer_id == 2 else 0.0),
             )
-            available = [w if self.groups[s] else 0 for s, w in zip(SOURCES, weights)]
-            if sum(available) == 0:
-                raise ValueError(f"No examples with positive sampling weight in replay view {view}")
-            if available != weights and view not in self.warned:
-                warnings.warn(
-                    f"{view}: empty source groups; renormalizing mixture to available data", stacklevel=2
-                )
-                self.warned.add(view)
-
-            expected = [count * w / sum(available) for w in available]
-            counts = [int(v) for v in expected]
-            for _ in range(count - sum(counts)):
-                fractional = [e - c for e, c in zip(expected, counts)]
-                index = self.rng.choices(range(3), weights=[max(0, v) for v in fractional])[0]
-                counts[index] += 1
-            indices = []
-            for source, n in zip(SOURCES, counts):
-                indices.extend(self.rng.choices(self.groups[source], k=n))
-            self.rng.shuffle(indices)
-        return stack_trees([tensor_record(self.records[i], cfg) for i in indices[start:end]])
+            samples.append(sample)
+        return stack_trees(samples)
 
 
 def save_shard(path, records, cfg):

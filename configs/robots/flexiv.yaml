@@ -1,4 +1,3 @@
-# Example only: calibrate workspace, reset pose, cameras and teleoperation before hardware use.
 robot_sn: YOUR_ROBOT_SERIAL
 network_interfaces:
 - YOUR_ROBOT_INTERFACE_IP
@@ -25,7 +24,7 @@ workspace_max:
 local_xy_radius: 0.1
 max_translation_step_m: 0.001
 max_rotation_step_rad: 0.02
-control_hz: 50
+control_hz: 30
 execution_horizon: 10
 max_episode_steps: 600
 camera_max_age_s: 0.5

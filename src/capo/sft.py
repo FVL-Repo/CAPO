@@ -86,7 +86,7 @@ class SFTTrainer:
             raise ValueError("SFT resume needs an offline SFT checkpoint and the same world size")
         if state["dataset_identity"] != self.dataset.identity:
             raise ValueError("SFT dataset changed")
-        ignore = {"output", "device", "sft_steps", "replay", "rounds"}
+        ignore = {"output", "device", "sft_steps", "replay", "max_actor_steps"}
         from capo.identity import canonical
 
         for k, v in asdict(self.cfg).items():

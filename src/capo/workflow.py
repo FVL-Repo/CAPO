@@ -16,9 +16,9 @@ def load_online(path):
         "adapter",
         "actor_init",
         "reward_config",
-        "episodes_per_round",
-        "min_new_records",
         "train_processes",
+        "collector_device",
+        "checkpoint_interval",
         "training",
     }
     if set(options) - allowed:

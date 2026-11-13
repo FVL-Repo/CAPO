@@ -1,16 +1,16 @@
-# Copyright 2024 Big Vision Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 """Gemma adaptation for Pi, taken from big_vision.
 
@@ -58,7 +58,7 @@ Variant = Literal["gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
 def get_config(variant: Variant) -> Config:
     """Returns config for specified gemma variant."""
     if variant == "gemma_300m":
-        # 311M params
+        
         return Config(
             width=1024,
             depth=18,
@@ -87,7 +87,7 @@ def get_config(variant: Variant) -> Config:
             lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
         )
     if variant == "gemma_300m_lora":
-        # 311M params
+        
         return Config(
             width=1024,
             depth=18,
@@ -104,21 +104,21 @@ def get_config(variant: Variant) -> Config:
 class RMSNorm(nn.Module):
     @nn.compact
     def __call__(self, x, cond):
-        dtype = x.dtype  # original dtype, could be half-precision
-        var = jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True)  # compute variance in float32
-        normed_inputs = jnp.asarray(x * jnp.reciprocal(jnp.sqrt(var + 1e-06)))  # compute normalization in float32
+        dtype = x.dtype  
+        var = jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True)  
+        normed_inputs = jnp.asarray(x * jnp.reciprocal(jnp.sqrt(var + 1e-06)))  
         if cond is None:
-            # regular RMSNorm
+            
             scale = self.param("scale", nn.initializers.zeros_init(), (x.shape[-1]))
             normed_inputs = normed_inputs * (
                 1 + scale
-            )  # scale by learned parameter in float32 (matches Flax implementation)
-            return normed_inputs.astype(dtype), None  # return in original dtype
+            )  
+            return normed_inputs.astype(dtype), None  
 
-        # adaptive RMSNorm
+        
         modulation = nn.Dense(x.shape[-1] * 3, kernel_init=nn.initializers.zeros, dtype=dtype)(cond)
         scale, shift, gate = jnp.split(modulation[:, None, :], 3, axis=-1)
-        normed_inputs = normed_inputs * (1 + scale) + shift  # scale and shift in float32
+        normed_inputs = normed_inputs * (1 + scale) + shift  
         return normed_inputs.astype(dtype), gate
 
 
@@ -153,12 +153,12 @@ class Attention(nn.Module):
 
     @nn.compact
     def __call__(self, xs, positions, attn_mask, kv_cache):
-        # all experts must share the same head dim, num heads, and num kv heads for self-attention to work
+        
         assert all(config.head_dim == self.configs[0].head_dim for config in self.configs)
         assert all(config.num_heads == self.configs[0].num_heads for config in self.configs)
         assert all(config.num_kv_heads == self.configs[0].num_kv_heads for config in self.configs)
 
-        dtype = next(x.dtype for x in xs if x is not None)  # original dtype, could be half-precision
+        dtype = next(x.dtype for x in xs if x is not None)  
 
         qkvs = []
         for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
@@ -196,7 +196,7 @@ class Attention(nn.Module):
 
         k = _apply_rope(k, positions=positions)
 
-        # should still be half-precision here (if input was half-precision)
+        
         assert q.dtype == k.dtype == v.dtype == dtype
 
         if kv_cache is not None:
@@ -212,8 +212,8 @@ class Attention(nn.Module):
                 f"Attention mask with shape {attn_mask.shape} but shapes for q and k are: {q.shape} and {k.shape}"
             )
 
-        # big_neg = jnp.finfo(logits.dtype).min
-        big_neg = -2.3819763e38  # See gemma/modules.py
+        
+        big_neg = -2.3819763e38  
         masked_logits = jnp.where(attn_mask[:, :, None, :, :], logits, big_neg)
 
         probs = jax.nn.softmax(masked_logits, axis=-1).astype(dtype)
@@ -249,7 +249,7 @@ class FeedForward(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        dtype = x.dtype  # original dtype, could be half-precision
+        dtype = x.dtype  
         w_gating = self.param(
             "gating_einsum",
             nn.initializers.lecun_normal(in_axis=-2, out_axis=-1, batch_axis=(0,)),
@@ -281,7 +281,7 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -291,7 +291,7 @@ class Block(nn.Module):
         gates = []
         for i, x in enumerate(xs):
             if x is not None:
-                x, gate = RMSNorm(name=_name("pre_attention_norm", i))(x, adarms_cond[i])  # noqa: PLW2901
+                x, gate = RMSNorm(name=_name("pre_attention_norm", i))(x, adarms_cond[i])  
             pre_attn.append(x)
             gates.append(gate if x is not None else None)
 
@@ -306,8 +306,8 @@ class Block(nn.Module):
         gates = []
         for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
             if x is not None:
-                x, gate = RMSNorm(name=_name("pre_ffw_norm", i))(x, adarms_cond[i])  # noqa: PLW2901
-                x = lora.FeedForward(  # noqa: PLW2901
+                x, gate = RMSNorm(name=_name("pre_ffw_norm", i))(x, adarms_cond[i])  
+                x = lora.FeedForward(  
                     features=config.width,
                     hidden_dim=config.mlp_dim,
                     name=_name("mlp", i),
@@ -331,26 +331,26 @@ KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array
 class Module(nn.Module):
     """Transformer model, supporting a mixture of different weights for different tokens."""
 
-    configs: Sequence[Config]  # list of configs, one for each expert
+    configs: Sequence[Config]  
     embed_dtype: str
 
     dropout: float = 0.0
-    dropout_bdims: tuple[int, ...] = ()  # Every float is dropped independently.
+    dropout_bdims: tuple[int, ...] = ()  
     adarms: bool = False
 
     def setup(self):
-        # all experts must have the same depth
+        
         assert all(config.depth == self.configs[0].depth for config in self.configs)
 
         self.embedder = Embedder(
             vocab_size=PALIGEMMA_VOCAB_SIZE,
-            embed_dim=self.configs[0].width,  # embedder for first expert only
+            embed_dim=self.configs[0].width,  
             name="embedder",
         )
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(5,),  # 0=self, 6=deterministic
+            static_argnums=(5,),  
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
@@ -363,7 +363,7 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+            ),  
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -379,7 +379,7 @@ class Module(nn.Module):
     @at.typecheck
     def __call__(
         self,
-        # list of token arrays, one for each expert, or None if that expert should not be run
+        
         embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
         positions: at.Int[at.Array, "b t"],
         mask: at.Bool[at.Array, "b t s"],
@@ -419,23 +419,23 @@ def _apply_rope(x, *, positions, max_wavelength=10_000):
     radians = positions[..., None] / timescale[None, None, :]
     radians = radians[..., None, :]
     assert radians.dtype == jnp.float32
-    # radians.shape = [...,L,1,d=D/2]
+    
     sin, cos = jnp.sin(radians), jnp.cos(radians)
     x1, x2 = jnp.split(x, 2, axis=-1)
     res = jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
     assert res.dtype == jnp.float32
-    # The original bigvision impl allows RoPE to upcast to float32. It is then immediately downcast again to the cache
-    # dtype when in inference mode (but not in training mode). I don't think any of this was intentional. Based on the
-    # original DeepMind impl, as well as the widely-used transformers impl, it is ok to always downcast back to bfloat16
-    # here.
+    
+    
+    
+    
     return res.astype(x.dtype)
 
 
 def _name(name, i):
-    # we name layers like this because we want the first expert's weights to have no suffix (e.g., "attn"), so that they
-    # can be loaded seamlessly from the existing PaliGemma checkpoint. subsequent experts will have a suffix (e.g.,
-    # "attn_1") and their weights will be initialized from scratch. in practice, we only use two experts -- PaliGemma,
-    # and the action expert.
+    
+    
+    
+    
     if i == 0:
         return name
     return f"{name}_{i}"

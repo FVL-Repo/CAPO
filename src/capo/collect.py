@@ -4,7 +4,7 @@ import uuid
 import numpy as np
 
 from capo.config import Config, local_path
-from capo.policy import Policy
+from capo.policy import Policy, LivePolicy
 from capo.processing import Processor
 from capo.replay import save_shard
 
@@ -73,6 +73,9 @@ def main():
     )
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--demonstration", action="store_true")
+    parser.add_argument("--continuous", action="store_true", help="Collect until stop-file/signal; episodes do not gate learning")
+    parser.add_argument("--policy-pointer")
+    parser.add_argument("--stop-file")
     args = parser.parse_args()
     cfg = Config.load(local_path(args.config))
     if args.adapter == "capo.robots.flexiv_client:create":
@@ -86,7 +89,21 @@ def main():
         )
     processor = Processor(cfg, args.norm_stats, quantile=not args.mean_std)
 
-    policy = None if args.demonstration else Policy(cfg, args.checkpoint, processor)
+    if args.continuous and (args.demonstration or not args.policy_pointer or not args.stop_file):
+        parser.error("Continuous online collection requires --policy-pointer and --stop-file")
+    import signal
+    stopping = False
+    def request_stop(*_):
+        nonlocal stopping
+        stopping = True
+    if args.continuous:
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+    def stop_requested():
+        return stopping or bool(args.stop_file and local_path(args.stop_file).exists())
+    policy = (None if args.demonstration else
+              LivePolicy(cfg, args.policy_pointer, processor) if args.policy_pointer else
+              Policy(cfg, args.checkpoint, processor))
     robot = create_adapter(args.adapter, cfg)
     if hasattr(robot, "demonstration"):
         robot.demonstration = args.demonstration
@@ -102,7 +119,8 @@ def main():
             processor,
             robot,
             policy,
-            episodes=args.episodes,
+            episodes=None if args.continuous else args.episodes,
+            stop_requested=stop_requested,
             demonstration=args.demonstration,
             policy_version=("sha256:" + file_sha256(local_path(args.checkpoint)))
             if args.checkpoint
@@ -113,7 +131,8 @@ def main():
             robot.close()
 
 
-def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstration=False, policy_version=None):
+def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstration=False,
+                     policy_version=None, stop_requested=lambda: False):
     import json
     from .robots.flexiv_rpc import pack
 
@@ -134,7 +153,10 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
             os.fsync(stream.fileno())
         temporary.replace(path)
 
-    for episode in range(episodes):
+    import itertools
+    for episode in (itertools.count() if episodes is None else range(episodes)):
+        if stop_requested():
+            break
         obs = robot.reset()
         episode_id = obs.get("robot_metadata", {}).get("episode_id", uuid.uuid4().hex)
         steps = human_count = 0
@@ -149,11 +171,19 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
 
         try:
             while True:
+                if stop_requested():
+                    if pending_record is not None:
+                        pending_record["truncated"] = True
+                        pending_record["metadata"]["collection_stopped"] = True
+                        publish_pending()
+                    truncated = True
+                    break
                 proposal = (
                     np.zeros((cfg.execution_horizon, cfg.robot_action_dim), np.float32)
                     if policy is None
                     else policy.infer(obs)["actions"][: cfg.execution_horizon]
                 )
+                decision_policy_version = getattr(policy, "version", policy_version)
                 selected, human, aligned = robot.choose_action(obs, proposal.copy())
                 if demonstration and not human:
                     raise ValueError("Demonstrations must be explicitly human-controlled")
@@ -165,7 +195,7 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
                     "human": human,
                     "aligned": aligned,
                     "demonstration": demonstration,
-                    "policy_version": policy_version,
+                    "policy_version": decision_policy_version,
                     "episode_id": episode_id,
                 }
                 stage_path = staging / (decision_id + ".msgpack")
@@ -217,7 +247,7 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
                     demonstration=demonstration,
                 )
                 record["metadata"].update(
-                    policy_version=policy_version,
+                    policy_version=decision_policy_version,
                     episode_id=episode_id,
                     decision_id=decision_id,
                     transition_index=steps,
@@ -244,7 +274,7 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
         report = {
             "episode": episode,
             "episode_id": episode_id,
-            "policy_version": policy_version,
+            "policy_version": getattr(policy, "version", policy_version),
             "primitive_steps": steps,
             "human_steps": human_count,
             "intervention_ratio": human_count / max(steps, 1),
@@ -255,7 +285,8 @@ def collect_episodes(cfg, processor, robot, policy, *, episodes=10, demonstratio
         print(json.dumps(report), flush=True)
         with (directory / "episodes.jsonl").open("a") as stream:
             stream.write(json.dumps(report) + "\n")
-        reports.append(report)
+        if episodes is not None:
+            reports.append(report)
     return reports
 
 

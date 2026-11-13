@@ -4,7 +4,7 @@ import math
 import torch
 from torch import Tensor
 from torch import nn
-import torch.nn.functional as F  # noqa: N812
+import torch.nn.functional as F  
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
@@ -14,7 +14,7 @@ import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
     if device_type == "cpu":
-        # CPU doesn't support bfloat16, use float32 instead
+        
         if target_dtype == torch.bfloat16:
             return torch.float32
         if target_dtype == torch.float64:
@@ -36,7 +36,7 @@ def create_sinusoidal_pos_embedding(
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
     period = min_period * (max_period / min_period) ** fraction
 
-    # Compute the outer product
+    
     scaling_factor = 1.0 / period * 2 * math.pi
     sin_input = scaling_factor[None, :] * time[:, None]
     return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
@@ -112,7 +112,7 @@ class PI0Pytorch(nn.Module):
         if config.pytorch_compile_mode is not None:
             self.sample_actions = torch.compile(self.sample_actions, mode=config.pytorch_compile_mode)
 
-        # Initialize gradient checkpointing flag
+        
         self.gradient_checkpointing_enabled = False
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
@@ -194,7 +194,7 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
 
-        # Process images
+        
         for img, img_mask in zip(images, img_masks, strict=True):
 
             def image_embed_func(img):
@@ -207,10 +207,10 @@ class PI0Pytorch(nn.Module):
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
 
-            # Create attention masks so that image tokens attend to each other
+            
             att_masks += [0] * num_img_embs
 
-        # Process language tokens
+        
         def lang_embed_func(lang_tokens):
             lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
             lang_emb_dim = lang_emb.shape[-1]
@@ -221,7 +221,7 @@ class PI0Pytorch(nn.Module):
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
 
-        # full attention between image and language inputs
+        
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
 
@@ -229,7 +229,7 @@ class PI0Pytorch(nn.Module):
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
 
-        # Get batch size from the first dimension of the concatenated tensors
+        
         bsize = pad_masks.shape[0]
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
@@ -245,7 +245,7 @@ class PI0Pytorch(nn.Module):
             if self.state_proj.weight.dtype == torch.float32:
                 state = state.to(torch.float32)
 
-            # Embed state
+            
             def state_proj_func(state):
                 return self.state_proj(state)
 
@@ -258,16 +258,16 @@ class PI0Pytorch(nn.Module):
             state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
             pad_masks.append(state_mask)
 
-            # Set attention masks so that image and language inputs do not attend to state or actions
+            
             att_masks += [1]
 
-        # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
+        
         time_emb = create_sinusoidal_pos_embedding(
             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
         )
         time_emb = time_emb.type(dtype=timestep.dtype)
 
-        # Fuse timestep + action information using an MLP
+        
         def action_proj_func(noisy_actions):
             return self.action_in_proj(noisy_actions)
 
@@ -277,19 +277,19 @@ class PI0Pytorch(nn.Module):
             time_emb = time_emb[:, None, :].expand_as(action_emb)
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
-            # Apply MLP layers
+            
             def mlp_func(action_time_emb):
                 x = self.action_time_mlp_in(action_time_emb)
-                x = F.silu(x)  # swish == silu
+                x = F.silu(x)  
                 return self.action_time_mlp_out(x)
 
             action_time_emb = self._apply_checkpoint(mlp_func, action_time_emb)
             adarms_cond = None
         else:
-            # time MLP (for adaRMS)
+            
             def time_mlp_func(time_emb):
                 x = self.time_mlp_in(time_emb)
-                x = F.silu(x)  # swish == silu
+                x = F.silu(x)  
                 x = self.time_mlp_out(x)
                 return F.silu(x)
 
@@ -297,14 +297,14 @@ class PI0Pytorch(nn.Module):
             action_time_emb = action_emb
             adarms_cond = time_emb
 
-        # Add to input tokens
+        
         embs.append(action_time_emb)
 
         bsize, action_time_dim = action_time_emb.shape[:2]
         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
         pad_masks.append(action_time_mask)
 
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
+        
         att_masks += [1] + ([0] * (self.config.action_horizon - 1))
 
         embs = torch.cat(embs, dim=1)
@@ -343,10 +343,10 @@ class PI0Pytorch(nn.Module):
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
 
-        # Prepare attention masks
+        
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
-        # Apply gradient checkpointing if enabled
+        
         def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
             (_, suffix_out), _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
@@ -365,7 +365,7 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
 
-        # Apply gradient checkpointing to final action projection if enabled
+        
         def action_out_proj_func(suffix_out):
             return self.action_out_proj(suffix_out)
 
@@ -387,9 +387,9 @@ class PI0Pytorch(nn.Module):
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
-        # Compute image and language key value cache
+        
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
-        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  
 
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
@@ -414,7 +414,7 @@ class PI0Pytorch(nn.Module):
                 expanded_time,
             )
 
-            # Euler step - use new tensor assignment instead of in-place operation
+            
             x_t = x_t + dt * v_t
             time += dt
         return x_t
@@ -443,9 +443,9 @@ class PI0Pytorch(nn.Module):
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
-        # Prepare attention masks
+        
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
-        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,

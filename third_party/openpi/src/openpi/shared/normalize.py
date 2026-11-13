@@ -10,8 +10,8 @@ import pydantic
 class NormStats:
     mean: numpydantic.NDArray
     std: numpydantic.NDArray
-    q01: numpydantic.NDArray | None = None  # 1st quantile
-    q99: numpydantic.NDArray | None = None  # 99th quantile
+    q01: numpydantic.NDArray | None = None  
+    q99: numpydantic.NDArray | None = None  
 
 
 class RunningStats:
@@ -25,7 +25,7 @@ class RunningStats:
         self._max = None
         self._histograms = None
         self._bin_edges = None
-        self._num_quantile_bins = 5000  # for computing quantiles on the fly
+        self._num_quantile_bins = 5000  
 
     def update(self, batch: np.ndarray) -> None:
         """
@@ -64,7 +64,7 @@ class RunningStats:
         batch_mean = np.mean(batch, axis=0)
         batch_mean_of_squares = np.mean(batch**2, axis=0)
 
-        # Update running mean and mean of squares.
+        
         self._mean += (batch_mean - self._mean) * (num_elements / self._count)
         self._mean_of_squares += (batch_mean_of_squares - self._mean_of_squares) * (num_elements / self._count)
 
@@ -91,7 +91,7 @@ class RunningStats:
             old_edges = self._bin_edges[i]
             new_edges = np.linspace(self._min[i], self._max[i], self._num_quantile_bins + 1)
 
-            # Redistribute the existing histogram counts to the new bins
+            
             new_hist, _ = np.histogram(old_edges[:-1], bins=new_edges, weights=self._histograms[i])
 
             self._histograms[i] = new_hist

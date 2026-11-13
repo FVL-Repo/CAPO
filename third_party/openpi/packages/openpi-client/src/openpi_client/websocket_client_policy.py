@@ -44,12 +44,12 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict) -> Dict:  
         data = self._packer.pack(obs)
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
-            # we're expecting bytes; if the server sends a string, it's an error.
+            
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
 

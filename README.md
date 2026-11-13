@@ -1,10 +1,10 @@
 <div align="center">
 
-# CAPO — ICLR Submission 26906
+# CAPO
 
 **Real-World Reinforcement Learning for VLA via Corrective Adjoint Policy Optimization**
 
-[Method](#method) · [Setup](#setup)
+Anonymous code repository for ICLR Submission 26906 · [Method](#method) · [Setup](#setup)
 
 </div>
 
@@ -34,7 +34,7 @@ CAPO starts from a task-adapted VLA, collects human-assisted experience, and alt
 | Human-assisted collection and online workflow | [collect.py](src/capo/collect.py), [workflow.py](src/capo/workflow.py) |
 | OpenPI π₀.₅ backbone and expert adaptation | [backbone.py](src/capo/backbone.py), [lora.py](src/capo/lora.py) |
 
-This repository provides CAPO with an OpenPI π₀.₅ backbone, full action-expert SFT with a frozen VLM, optional expert LoRA, and a Flexiv interface. All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
+This repository provides CAPO with an OpenPI π₀.₅ backbone, expert LoRA, and a Flexiv interface. All model image inputs are 224 × 224. See [training design](docs/method.md) for implementation choices and configuration details.
 
 ## Setup
 
@@ -74,7 +74,7 @@ Follow [OpenPI's fine-tuning guide](https://github.com/Physical-Intelligence/ope
 | --- | --- |
 | `configs/robots/flexiv.yaml` | Robot/camera IDs, workspace, reset pose, teleoperation, task |
 | `configs/workflow/dataset.yaml` | Adapter, data paths, task, normalization |
-| `configs/workflow/sft.yaml` | Base weights, dimensions, horizons, full action-expert tuning, batch size, schedule |
+| `configs/workflow/sft.yaml` | Base weights, dimensions, horizons, LoRA, batch size, schedule |
 
 Start the [robot server](docs/robot.md), then collect and prepare demonstrations:
 
@@ -88,9 +88,7 @@ torchrun --standalone --nproc-per-node=8 -m capo.sft \
 
 `prepare` computes normalization with OpenPI's `RunningStats`. Add `--existing-norm` to reuse matching task statistics. Existing demonstrations can use the [NPZ format](docs/data.md).
 
-SFT freezes the VLM and trains all action-expert parameters together with the action input/output projections and time MLPs (`actor_tuning: full`, `train_action_time_projections: true`). No LoRA adapters are used in the default SFT configuration.
-
-SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 256, microbatch 32 per GPU on eight GPUs. Adjust these for your hardware.
+SFT reads offline demonstrations and writes `runs/sft/sft.pt` and `runs/sft/config.json`. The template uses global batch 240, microbatch 32 per GPU on eight GPUs (30 samples per GPU). Adjust these for your hardware.
 
 ## 2. Reward model (optional)
 
@@ -110,9 +108,11 @@ Configure `configs/workflow/online.yaml` with the SFT configuration/checkpoint, 
 python -m capo.workflow --config configs/workflow/online.yaml
 ```
 
-Each round collects transitions, updates the critic with CVL and the actor with APO + BC, then publishes the actor. Re-run the same command to resume.
+Collection and learning run concurrently. After 200 one-time critic warmup updates, the learner repeats one critic-only update followed by one critic update and one actor update. The reference refreshes every 500 actor updates; there is no episodes-per-learning-round setting. Policy publication is separate and defaults to every 100 actor updates. Re-run the same command to resume, or increase `max_actor_steps` to extend a completed run. See [training design](docs/method.md).
 
-Flexiv uses `CAPO_FLEXIV_URL` and `configs/robots/flexiv.yaml`. Other robots plug in through the YAML `adapter: package.module:create` field, see [robot integration](docs/robot.md).
+Three-buffer replay routes offline experts to demo, online execution to exec, and interventions to demo+exec (also inter when same-state pairs are available). CVL samples demo/exec/inter at 40/40/20; all sampled executed transitions receive TD and only the sampled inter pairs receive ranking. Actor updates use one 40/40/20 batch: BC selects only demo-buffer segments (experts and interventions), and APO uses demo/exec states. See [data and sampling contracts](docs/data.md).
+
+Flexiv uses `CAPO_FLEXIV_URL` and `configs/robots/flexiv.yaml`, with control frequency set to 30 Hz. Other robots plug in through the YAML `adapter: package.module:create` field, see [robot integration](docs/robot.md).
 
 ## 4. Policy serving and export
 
@@ -137,8 +137,6 @@ Set `device` in the exported configuration to `cuda` for GPU inference. Use your
 
 ## License
 
-CAPO is distributed under [Apache-2.0](LICENSE). Third-party code and assets remain subject to their applicable licenses and attribution notices; the project license does not replace those terms.
+CAPO is distributed under [Apache-2.0](LICENSE). Third-party code and assets remain subject to their applicable licenses and attribution notices.
 
-Retained third-party notices: [QAM license](third_party/licenses/QAM_LICENSE), [SERL license](third_party/licenses/SERL_LICENSE), [robot integration license](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).
-
-These links identify license notices. They do not, by themselves, establish either identical or independent implementations. Methodological similarities, implementation differences, and any code reuse should be described separately and specifically.
+Retained notices: [QAM license](third_party/licenses/QAM_LICENSE), [SERL license](third_party/licenses/SERL_LICENSE), [robot integration license](src/capo/robots/THIRD_PARTY_LICENSE), and [third-party notices](THIRD_PARTY.md).

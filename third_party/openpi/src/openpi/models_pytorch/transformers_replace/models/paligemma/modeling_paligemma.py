@@ -1,17 +1,17 @@
-# coding=utf-8
-# Copyright 2024 the HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """PyTorch PaliGemmamodel."""
 
 from dataclasses import dataclass
@@ -115,8 +115,8 @@ class PaliGemmaPreTrainedModel(PreTrainedModel):
     _supports_attention_backend = True
 
     def _init_weights(self, module):
-        # important: this ported version of PaliGemmaisn't meant for training from scratch - only
-        # inference and fine-tuning
+        
+        
         std = getattr(self.config, "initializer_range", self.config.get_text_config().initializer_range)
 
         if isinstance(module, nn.Linear):
@@ -132,7 +132,7 @@ class PaliGemmaPreTrainedModel(PreTrainedModel):
 )
 class PaliGemmaModel(PaliGemmaPreTrainedModel):
     _checkpoint_conversion_mapping = {"language_model.model": "language_model"}
-    # we are filtering the logits/labels so we shouldn't divide the loss based on num_items_in_batch
+    
     accepts_loss_kwargs = False
 
     def __init__(self, config: PaliGemmaConfig):
@@ -147,11 +147,11 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self.post_init()
 
-    # Copied from transformers.models.llava.modeling_llava.LlavaModel.get_input_embeddings with Llava->PaliGemma
+    
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
-    # Copied from transformers.models.llava.modeling_llava.LlavaModel.set_input_embeddings with Llava->PaliGemma
+    
     def set_input_embeddings(self, value):
         self.language_model.set_input_embeddings(value)
 
@@ -193,13 +193,13 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
             )
 
         if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            
             return attention_mask
 
         causal_mask = torch.full(
             (sequence_length, target_length), fill_value=min_dtype, dtype=self.dtype, device=cache_position.device
         )
-        # Causal diagonal mask only if training, otherwise attend to the whole prefix. Training-specific attn for prefix is handled below
+        
         if sequence_length != 1:
             if is_training:
                 causal_mask = torch.triu(causal_mask, diagonal=1)
@@ -209,10 +209,10 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
         causal_mask *= torch.arange(target_length, device=cache_position.device) > cache_position.reshape(-1, 1)
         causal_mask = causal_mask[None, None, :, :].expand(inputs_lead_dim, 1, -1, -1)
         if attention_mask is not None:
-            causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+            causal_mask = causal_mask.clone()  
             mask_length = attention_mask.shape[-1]
 
-            # First unmask prefix tokens during training
+            
             if is_training:
                 if token_type_ids is None:
                     raise ValueError("Token type ids must be provided during training")
@@ -220,7 +220,7 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
                     token_type_ids[:, None, None, :].to(causal_mask.device) == 0, 0
                 )
 
-            # Then apply padding mask (will mask pad tokens)
+            
             padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(causal_mask.device)
             padding_mask = padding_mask == 0
             causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
@@ -282,7 +282,7 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
 
         is_training = token_type_ids is not None and labels is not None
 
-        # Replace image id woth PAD if the image token if OOV, to avoid index-errors
+        
         if input_ids is not None and self.config.image_token_id >= self.vocab_size:
             special_image_mask = input_ids == self.config.image_token_id
             llm_input_ids = input_ids.clone()
@@ -300,9 +300,9 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
             )
 
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0) + 1  # Paligemma positions are 1-indexed
+            position_ids = cache_position.unsqueeze(0) + 1  
 
-        # Merge text and images
+        
         if pixel_values is not None:
             image_features = self.get_image_features(pixel_values)
 
@@ -393,7 +393,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
     def get_image_features(self, pixel_values):
         return self.model.get_image_features(pixel_values)
 
-    # Make modules available throught conditional class for BC
+    
     @property
     def language_model(self):
         return self.model.language_model
@@ -457,7 +457,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
         )
 
         hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
@@ -491,7 +491,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
         labels=None,
         **kwargs,
     ):
-        # Overwritten -- custom `position_ids` and `pixel_values` handling
+        
         model_inputs = super().prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
@@ -505,11 +505,11 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
             **kwargs,
         )
 
-        # position_ids in Paligemma are 1-indexed
+        
         if model_inputs.get("position_ids") is not None:
             model_inputs["position_ids"] += 1
-        # If we're in cached decoding stage, pixel values should be None because input ids do not contain special image token anymore
-        # Otherwise we need pixel values to be passed to model. NOTE: use_cache=False needs pixel_values always
+        
+        
         if cache_position[0] == 0:
             model_inputs["pixel_values"] = pixel_values
         is_training = token_type_ids is not None and labels is not None
@@ -523,7 +523,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
         return model_inputs
 
     @staticmethod
-    # Copied from transformers.models.gptj.modeling_gptj.GPTJModel._prepare_4d_causal_attention_mask_with_cache_position
+    
     def _prepare_4d_causal_attention_mask_with_cache_position(
         attention_mask: torch.Tensor,
         sequence_length: int,
@@ -554,7 +554,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
                 Batch size.
         """
         if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            
             causal_mask = attention_mask
         else:
             min_dtype = torch.finfo(dtype).min
@@ -566,7 +566,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel, GenerationMixi
             causal_mask *= torch.arange(target_length, device=cache_position.device) > cache_position.reshape(-1, 1)
             causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
             if attention_mask is not None:
-                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+                causal_mask = causal_mask.clone()  
                 mask_length = attention_mask.shape[-1]
                 padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(
                     causal_mask.device

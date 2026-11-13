@@ -12,17 +12,17 @@ import openpi.shared.array_typing as at
 class LoRAConfig:
     """Configuration for LoRA."""
 
-    # LoRA rank.
+    
     rank: int
-    # LoRA scaling factor.
+    
     alpha: float = 1.0
-    # Initialization function for LoRA parameters.
+    
     init_fn: nn.initializers.Initializer = nn.initializers.normal(stddev=0.01)
-    # Enable rank-stabilized LoRA: https://arxiv.org/pdf/2312.03732
+    
     rslora: bool = False
-    # Axes in the weight to apply LoRA to. Should typically be the last two axes.
+    
     axes: tuple[int, int] = (-2, -1)
-    # Axis label which is used by LoRA in einsum equations. Must not be present in the original equation.
+    
     label: str = "L"
 
     @property
@@ -33,18 +33,18 @@ class LoRAConfig:
 class Einsum(nn.Module):
     """Einsum with LoRA support. Can be used as a drop-in replacement for the Gemma Einsum."""
 
-    # Shape of the weight.
+    
     shape: tuple[int, ...]
-    # Initialization function for the weight.
+    
     init_fn: nn.initializers.Initializer = nn.initializers.zeros
-    # If not None, apply LoRA to the weight.
+    
     lora_config: LoRAConfig | None = None
 
     def setup(self):
         self.w = self.param("w", self.init_fn, self.shape)
 
         if config := self.lora_config:
-            # Setup LoRA parameters.
+            
             shape_a, shape_b = list(self.shape), list(self.shape)
             shape_a[config.axes[1]] = config.rank
             shape_b[config.axes[0]] = config.rank
@@ -53,7 +53,7 @@ class Einsum(nn.Module):
 
     @nn.compact
     def __call__(self, eqn: str, x):
-        dtype = x.dtype  # original dtype, could be half-precision
+        dtype = x.dtype  
         result = jnp.einsum(eqn, x, self.w.astype(dtype))
 
         if config := self.lora_config:
@@ -90,7 +90,7 @@ class FeedForward(nn.Module):
 
     features: int
     hidden_dim: int
-    # If not None, apply LoRA to the weight.
+    
     lora_config: LoRAConfig | None = None
 
     def setup(self):
@@ -107,7 +107,7 @@ class FeedForward(nn.Module):
         self.w_gating_lora = None
         self.w_linear_lora = None
         if self.lora_config:
-            # Setup LoRA parameters.
+            
             self.w_gating_lora = (
                 self.param("gating_einsum_lora_a", self.lora_config.init_fn, (2, self.features, self.lora_config.rank)),
                 self.param(
@@ -121,7 +121,7 @@ class FeedForward(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        dtype = x.dtype  # original dtype, could be half-precision
+        dtype = x.dtype  
         ff_gate = self._dot(
             x,
             self.w_gating[0],
